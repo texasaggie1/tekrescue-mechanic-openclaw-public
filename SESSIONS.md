@@ -38,6 +38,24 @@ Be honest about half-finished work.
 
 ---
 
+## 2026-08-31 (CDT) - branch: main - quickstart clone URL fix
+
+### What we did
+- Fixed the README Quickstart: it cloned the maintainer's private
+  development repo (a 404 for everyone else). It now clones this repo.
+
+### Current state
+Quickstart works end to end from a fresh clone of this repo.
+
+### Decisions made
+- None beyond the fix.
+
+### Open questions
+- None new.
+
+### Next session should
+1. Carry on from the release entry below.
+
 ## 2026-08-31 (CDT) - branch: main - v0.1.3, initial public release
 
 ### What we did

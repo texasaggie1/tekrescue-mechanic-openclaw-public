@@ -112,7 +112,7 @@ or newer (Homebrew's `python@3.14` works) and `openclaw` already
 installed and healthy.
 
 ```bash
-git clone https://github.com/texasaggie1/tekrescue-mechanic-openclaw.git && cd tekrescue-mechanic-openclaw
+git clone https://github.com/texasaggie1/tekrescue-mechanic-openclaw-public.git && cd tekrescue-mechanic-openclaw-public
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
