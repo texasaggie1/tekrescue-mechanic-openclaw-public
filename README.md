@@ -111,6 +111,14 @@ Tested on a fresh M-series Mac running macOS 15+. Requires Python 3.11
 or newer (Homebrew's `python@3.14` works) and `openclaw` already
 installed and healthy.
 
+Honest recommendation: this whole thing goes best with a good AI coding
+tool driving (Claude Code, Codex, Cursor, or whatever you already use).
+Clone the repo, point your tool at it, and say "install this and verify
+it works." It will read [AGENTS.md](AGENTS.md), run the commands below,
+handle whatever your machine throws at it, and know the safety rules
+for touching a live OpenClaw. Doing it by hand works fine too; the
+commands are right here.
+
 ```bash
 git clone https://github.com/texasaggie1/tekrescue-mechanic-openclaw-public.git && cd tekrescue-mechanic-openclaw-public
 python3 -m venv .venv
@@ -448,11 +456,16 @@ the rolling `nightly/` directory keeps the last
 
 ## Working on this with an AI assistant
 
-This repo is built to be driven by AI coding tools, whichever one you
-use. [AGENTS.md](AGENTS.md) carries full instructions for your
-assistant (Claude Code, ChatGPT/Codex, Cursor, and friends all pick it
-up; CLAUDE.md points there too): the architecture rules, the
-maintenance safety orders for touching a live OpenClaw install, and the
+This repo is built to be driven by AI coding tools, and honestly, that
+is the best way to run it: install, troubleshooting, and especially the
+occasional big OpenClaw release all go smoother with Claude Code,
+Codex, or another capable coding agent at the wheel. We have run this
+workflow with both Claude and ChatGPT and it holds up.
+
+[AGENTS.md](AGENTS.md) carries full instructions for your assistant
+(Claude Code, ChatGPT/Codex, Cursor, and friends all pick it up;
+CLAUDE.md points there too): the architecture rules, the maintenance
+safety orders for touching a live OpenClaw install, and the
 [SESSIONS.md](SESSIONS.md) protocol we use so any AI session can pick
 up exactly where the last one stopped. Point your assistant at this
 repo and it will know how to behave.

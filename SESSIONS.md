@@ -38,6 +38,27 @@ Be honest about half-finished work.
 
 ---
 
+## 2026-08-31 (CDT) - branch: main - recommend AI-driven install
+
+### What we did
+- README now openly recommends running the install (and later
+  maintenance) with a good AI coding tool: a short note at the top of
+  Quickstart and a strengthened "Working on this with an AI assistant"
+  section. Both Claude and ChatGPT have been through this workflow.
+
+### Current state
+No code changes; docs only.
+
+### Decisions made
+- The recommendation lives in the README (for humans); AGENTS.md stays
+  addressed to the tools themselves.
+
+### Open questions
+- None new.
+
+### Next session should
+1. Carry on from the entries below.
+
 ## 2026-08-31 (CDT) - branch: main - quickstart clone URL fix
 
 ### What we did
