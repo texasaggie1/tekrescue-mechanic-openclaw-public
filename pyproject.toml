@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tekrescue-mechanic"
+version = "0.1.3"
+description = "macOS supervisor that auto-heals OpenClaw after broken updates."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Randy Bryan, tekRESCUE LLC" },
+]
+keywords = ["openclaw", "macos", "supervisor", "launchd", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "pexpect>=4.9",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+mechanic = "mechanic.cli:main"
+mechanic-updater = "mechanic.updater:main"
+mechanic-supervisor = "mechanic.supervisor:main"
+
+[project.urls]
+Homepage = "https://github.com/texasaggie1/tekrescue-mechanic-openclaw-public"
+Issues = "https://github.com/texasaggie1/tekrescue-mechanic-openclaw-public/issues"
+
+[tool.setuptools.packages.find]
+include = ["mechanic*"]
+exclude = ["tests*"]
