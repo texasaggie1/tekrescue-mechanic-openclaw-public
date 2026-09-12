@@ -6,7 +6,10 @@ Fires every SUPERVISOR_INTERVAL_MINUTES via launchd. Each tick:
    verifier uses).
 2. If healthy, also asks OpenClaw whether an update is available via
    `openclaw update status --json`. The boolean lives at
-   `availability.available` in the JSON payload.
+   `availability.available` in the JSON payload. When one is, the tick
+   also runs the release waiting period (release_age.plan_update) so the
+   heartbeat says which version the nightly will actually install, or
+   when the advertised one becomes old enough.
 3. Pushes a Telegram (or whatever notifier is configured) message with
    the result every tick. Healthy-and-up-to-date is still worth a ping
    because the absence of one tells the operator the supervisor itself
@@ -30,6 +33,7 @@ from typing import Optional
 from .config import Config, LOG_FILE, load_config
 from .logging_setup import configure_logging
 from .notifier import send as notify_send
+from .release_age import plan_update
 from .verifier import (
     UpdateAvailability,
     VerifyResult,
@@ -84,10 +88,7 @@ def _send_heartbeat(
     if update.error:
         update_line = f"Update check skipped: {update.error}"
     elif update.available:
-        latest = update.latest_version or "newer version"
-        update_line = (
-            f"Update available: {latest}. Mechanic will install at {config.update_time} local."
-        )
+        update_line = _describe_update(config, health, update)
     else:
         update_line = "No updates available."
 
@@ -99,6 +100,34 @@ def _send_heartbeat(
     result = notify_send(config, subject, "\n".join(body_lines))
     if not result.delivered:
         _LOG.warning("supervisor: notifier did not deliver heartbeat: %s", result.error)
+
+
+def _describe_update(
+    config: Config,
+    health: VerifyResult,
+    update: UpdateAvailability,
+) -> str:
+    """One heartbeat line saying what the nightly will do about the update."""
+    latest = update.latest_version or "newer version"
+    plan = plan_update(
+        config,
+        installed_version=health.version,
+        availability=update,
+    )
+    if plan.install:
+        target = plan.target_version or latest
+        if config.min_update_age_days <= 0:
+            return (
+                f"Update available: {latest}. Mechanic will install at "
+                f"{config.update_time} local."
+            )
+        return (
+            f"Update available: {latest}. Mechanic will install {target} at "
+            f"{config.update_time} local: {plan.reason}"
+        )
+    if plan.error:
+        return f"Update available: {latest}, NOT installing. {plan.reason}"
+    return f"Update available: {latest}, waiting. {plan.reason}"
 
 
 def _send_unhealthy(

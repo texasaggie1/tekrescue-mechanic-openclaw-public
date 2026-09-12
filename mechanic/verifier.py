@@ -163,11 +163,18 @@ def verify_openclaw(
 
 @dataclass(frozen=True)
 class UpdateAvailability:
-    """Result of an `openclaw update status --json` probe."""
+    """Result of an `openclaw update status --json` probe.
+
+    `channel` is the update channel OpenClaw reports (stable, beta,
+    extended-stable, dev) when the payload carries one, lowercased. None
+    when the payload has no recognisable channel field; callers treat that
+    as stable, OpenClaw's default.
+    """
 
     available: bool
     latest_version: Optional[str]
     error: Optional[str]
+    channel: Optional[str] = None
 
 
 def check_for_updates(config: Config) -> UpdateAvailability:
@@ -220,7 +227,33 @@ def check_for_updates(config: Config) -> UpdateAvailability:
         available=bool(availability.get("available")),
         latest_version=availability.get("latestVersion"),
         error=None,
+        channel=_extract_channel(payload),
     )
+
+
+def _extract_channel(payload: object) -> Optional[str]:
+    """Best-effort read of the update channel from the status payload.
+
+    OpenClaw's documentation says `update status --json` reports the
+    channel but does not pin down the key, so this looks in the places it
+    could plausibly live and accepts either a bare string or an object
+    with a `name`/`channel` string. Anything else yields None.
+    """
+    if not isinstance(payload, dict):
+        return None
+    availability = payload.get("availability")
+    update = payload.get("update")
+    candidates = [
+        payload.get("channel"),
+        availability.get("channel") if isinstance(availability, dict) else None,
+        update.get("channel") if isinstance(update, dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidate = candidate.get("name") or candidate.get("channel")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().lower()
+    return None
 
 
 def extract_version(text: str) -> Optional[str]:

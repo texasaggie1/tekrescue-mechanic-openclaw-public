@@ -6,6 +6,8 @@ OpenClaw is an extremely useful product, but it seems to break every time we upd
 
 **Mechanic backs up before every update. More importantly, Mechanic knows when to stop.** After three consecutive failed nights, it folds its arms and stops touching OpenClaw entirely, rather than doing the same broken thing seventeen more times on top of an already-broken state. That is the difference between one bad morning and a compounded mess you cannot recover from.
 
+**Mechanic also refuses to be first.** A new OpenClaw release has to sit on the npm registry for a week before Mechanic will install it, so a poisoned release (a bad commit on main, a hijacked publish token) has time to be noticed and pulled by the people who watch these things for a living. Mechanic's own Python dependencies are locked under the same rule. See [The one-week waiting period](#the-one-week-waiting-period).
+
 ## What you'll get every morning
 
 Mechanic sends one DM to your chat channel after the 02:00 routine
@@ -23,17 +25,32 @@ tekRESCUE Mechanic: success
 
 STATUS: SUCCESS
 
-Run started:  2026-05-23T21:48:38+00:00
-Run finished: 2026-05-23T21:58:14+00:00
+Run started:  2026-09-13T07:00:02+00:00
+Run finished: 2026-09-13T07:09:41+00:00
 
-OpenClaw version: 2026.5.20 -> 2026.5.20
+OpenClaw version: 2026.8.2 -> 2026.9.2
 
-Snapshot taken: 2026-05-23T21-48-38Z
-Update:   openclaw update exit 0 (reports 2026.5.20)
+Snapshot taken: 2026-09-13T07-00-02Z
+Update:   openclaw update --tag 2026.9.2 exit 0 (reports 2026.9.2)
+Install modified: yes
 Doctor:   exit 0, matched 0 known prompt(s)
-Verify:   healthy (2026.5.20, exit 0, 128 ms)
-Last success: 2026-05-23T21:58:14+00:00
-Last known good: 2026-05-23T21-56-13Z
+Verify:   healthy (2026.9.2, exit 0, 128 ms)
+Last success: 2026-09-13T07:09:41+00:00
+Last known good: 2026-09-13T07-09-40Z
+
+Notes:
+  - Waiting period (MIN_UPDATE_AGE_DAYS=7): 2026.9.2 (published 2026-09-05, 7 days old) is the newest release at least 7 days old; 2026.9.4 (published 2026-09-11, 1 day old) waits. Next: 2026.9.3 becomes eligible 2026-09-15T13:06Z.
+```
+
+Most nights there is nothing old enough that you do not already have,
+and the report says so instead:
+
+```
+Update:   skipped (waiting period; see notes)
+Install modified: no
+...
+Notes:
+  - Waiting period (MIN_UPDATE_AGE_DAYS=7): 2026.9.4 (published 2026-09-11, 1 day old) is too new; Mechanic waits until a release is 7 days old. Installed 2026.9.2 is already the newest release old enough. Next: 2026.9.3 becomes eligible 2026-09-15T13:06Z.
 ```
 
 ### Heartbeat (every 4 hours, all day, all night)
@@ -45,11 +62,19 @@ OpenClaw 2026.5.20 healthy (130 ms).
 No updates available.
 ```
 
-When OpenClaw publishes a new version, the heartbeat reads:
+When OpenClaw publishes a new version, the heartbeat says what the
+nightly will do about it, and when:
 
 ```
-OpenClaw 2026.5.20 healthy (130 ms).
-Update available: 2026.5.21. Mechanic will install at 02:00 local.
+OpenClaw 2026.9.2 healthy (130 ms).
+Update available: 2026.9.4, waiting. 2026.9.4 (published 2026-09-11, 1 day old) is too new; Mechanic waits until a release is 7 days old. Installed 2026.9.2 is already the newest release old enough. Next: 2026.9.3 becomes eligible 2026-09-15T13:06Z.
+```
+
+Once a release you do not have yet is old enough:
+
+```
+OpenClaw 2026.8.2 healthy (130 ms).
+Update available: 2026.9.4. Mechanic will install 2026.9.2 at 02:00 local: 2026.9.2 (published 2026-09-05, 7 days old) is the newest release at least 7 days old; 2026.9.4 (published 2026-09-11, 1 day old) waits. Next: 2026.9.3 becomes eligible 2026-09-15T13:06Z.
 ```
 
 ### Bad morning (Mechanic auto-paused itself)
@@ -123,9 +148,17 @@ commands are right here.
 git clone https://github.com/texasaggie1/tekrescue-mechanic-openclaw-public.git && cd tekrescue-mechanic-openclaw-public
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install --require-hashes -r requirements.txt
+pip install --no-build-isolation --no-deps -e .
 ./install.sh
 ```
+
+The two `pip install` lines are deliberate. The first installs exactly
+the dependency versions this release was tested with, verified by
+sha256 hash, nothing newer; the second installs Mechanic itself without
+letting pip fetch anything else. A plain `pip install -e .` also works,
+but it takes whatever is newest on PyPI that day, which is the thing the
+[waiting period](#the-one-week-waiting-period) exists to avoid.
 
 install.sh prints a warning block, asks you to confirm you've backed
 up `~/.openclaw`, writes the two LaunchAgent plists, loads them, then
@@ -159,6 +192,7 @@ up changes on their next scheduled invocation.
 | Variable | Default | Description |
 |---|---|---|
 | `UPDATE_TIME` | `02:00` | Local time the nightly routine fires. 24-hour. |
+| `MIN_UPDATE_AGE_DAYS` | `7` | A release must have been public on the npm registry this many days before Mechanic installs it. Mechanic installs the newest release that is old enough (via `openclaw update --tag`), so it trails OpenClaw by about this long. `0` turns the wait off. Needs `npm` next to `openclaw` or on PATH. |
 | `SUPERVISOR_INTERVAL_MINUTES` | `240` | Heartbeat cadence, in minutes. 240 = 6 pings/day. |
 | `SNAPSHOT_RETENTION_DAYS` | `14` | Rolling nightly snapshots kept under `snapshots/nightly/`. Sticky snapshots (`first-known-good`, `last-known-good`) are never pruned. |
 | `MIN_FREE_DISK_MB_FOR_SNAPSHOT` | `500` | Free disk floor for a run. If the snapshot volume is short, Mechanic first deletes its own oldest nightly snapshots to make room (never the first or last known good, and always keeping the 3 newest), and only refuses to start if that is still not enough. |
@@ -172,6 +206,69 @@ up changes on their next scheduled invocation.
 `.env.example` but dormant in v0.1.1 (no auto-rollback; doctor runs
 `--non-interactive`). Reserved for v0.2.
 
+## The one-week waiting period
+
+OpenClaw ships a new release every two or three days, built from a
+repository with hundreds of contributors. That pace is great for
+features and terrible for anyone whose machine installs whatever is
+newest at 2 a.m. If a release is ever poisoned, whether by a bad commit
+that slipped onto main, a hijacked publish token, or a compromised
+build machine, it is usually noticed and pulled within days. The people
+who install it on day one are the ones who get hurt.
+
+So Mechanic waits. By default (`MIN_UPDATE_AGE_DAYS=7`) it will not
+install any OpenClaw release until it has been on the npm registry for
+seven days. Because the newest release is almost never a week old,
+"wait for latest" would mean "never update"; instead, every night
+Mechanic works out the newest release that IS old enough and installs
+that one, using OpenClaw's own `openclaw update --yes --tag <version>`.
+You end up riding the release train about a week behind the front car,
+with OpenClaw's normal update path doing the actual work (doctor,
+migrations, plugin sync, restart), just aimed at a slightly older
+version.
+
+How it decides:
+
+- Publish dates come from the npm registry, read through your own
+  `npm` (`npm view openclaw time versions dist-tags --json`), so any
+  registry mirror, proxy, or token in your `.npmrc` applies exactly as
+  it does for `openclaw update`. It is a read-only query.
+- Only real releases count. Betas and hotfix-style prereleases
+  (`2026.9.1-beta.1`, `2026.2.2-1`) are never picked, and nothing above
+  what npm tags as `latest` is either.
+- Mechanic never downgrades. If you updated by hand to something newer
+  than the oldest-eligible release, it leaves you there and says so.
+- If it cannot establish dates (no `npm` on the machine, registry
+  unreachable), it installs nothing and the morning report tells you
+  why. Unknown means wait.
+- The heartbeat and the morning report always name the version chosen,
+  its publish date, and when the next one becomes eligible, so you are
+  never guessing what Mechanic will do tonight.
+
+If you run OpenClaw on the beta, extended-stable, or dev channel,
+Mechanic still applies the wait to the version OpenClaw reports, but
+does not pick intermediate versions for you (that selection belongs to
+OpenClaw on those channels).
+
+What the wait does not cover, honestly: OpenClaw's own npm dependency
+tree. The published `openclaw` package has 65 direct dependencies and
+ships no lockfile, so `openclaw update` resolves those fresh at install
+time, and a week-old OpenClaw can still pull in a day-old transitive
+dependency. Mechanic cannot fix that from the outside without changing
+how OpenClaw installs itself. If that matters to you, keep an eye on
+`npm config set before=<date>`, which makes npm resolve everything as of
+a given date; it is untested with OpenClaw's updater, so we have not
+turned it on for you.
+
+Mechanic holds itself to the same rule. `requirements.txt` pins every
+Python package Mechanic installs, with sha256 hashes, and it is only
+regenerated by `scripts/deps/relock.sh`, which refuses releases younger
+than seven days. `python3 scripts/deps/check_pin_age.py` verifies the
+pins against PyPI's upload dates any time you like.
+
+To wait longer, raise `MIN_UPDATE_AGE_DAYS`. To go back to installing
+the newest release the night it lands, set it to `0`.
+
 ## Verify it's working
 
 `mechanic status` prints a snapshot of the current install. Healthy
@@ -179,13 +276,14 @@ output looks like this:
 
 ```
 tekRESCUE Mechanic for OpenClaw
-  version: 0.1.1
+  version: 0.1.4
 
 Configuration:
   file:                /Users/you/.config/tekrescue-mechanic/.env (ok)
   openclaw bin:        /opt/homebrew/bin/openclaw (ok)
   openclaw config:     /Users/you/.openclaw (ok)
   update time:         02:00 local
+  min update age:      7 days (npm: /opt/homebrew/bin/npm)
   supervisor interval: 240 min
   prompt mode:         STRICT
   snapshot retention:  14 days
@@ -208,7 +306,10 @@ Recent log (~/Library/Logs/tekrescue-mechanic/mechanic.log):
 
 The three `(ok)` markers next to file paths are the load-bearing ones.
 If any of them says `missing`, edit `~/.config/tekrescue-mechanic/.env`
-and re-run `mechanic status`.
+and re-run `mechanic status`. The `min update age` line should name an
+`npm`; if it says `npm NOT found`, the waiting period cannot read
+publish dates and no update will install until it can (see
+Troubleshooting).
 
 Other useful commands:
 
@@ -386,6 +487,42 @@ verify step still passes, OpenClaw is healthy but stuck on its
 current version; investigate via `openclaw update status --json` and
 `openclaw doctor --lint`.
 
+### The heartbeat says an update is available but Mechanic keeps waiting
+
+That is the [waiting period](#the-one-week-waiting-period) doing its
+job. The heartbeat and the morning report name the release Mechanic is
+holding back, its publish date, and the exact time the next release
+becomes eligible. Nothing to fix. If you want a specific release now,
+run `openclaw update --yes --tag <version>` yourself; Mechanic never
+downgrades, so it will simply carry on from there. If a week is longer
+than you want, lower `MIN_UPDATE_AGE_DAYS` in
+`~/.config/tekrescue-mechanic/.env` (or set it to `0` to install the
+newest release the night it lands).
+
+### The report says "waiting period could not be applied"
+
+Mechanic reads publish dates with `npm view`, and it looks for `npm`
+next to your `openclaw` binary first, then on the LaunchAgent PATH
+(`/usr/local/bin`, `/opt/homebrew/bin`, and the system dirs). If
+OpenClaw was installed with pnpm or bun and there is no `npm` in those
+places, the note in the report says so and Mechanic installs nothing,
+because "unknown" means wait. Fix it by installing npm (it comes with
+Node.js; `brew install node` gives you one on Homebrew) or by
+symlinking your npm into `/usr/local/bin`. `mechanic status` confirms
+which npm it found. If the note instead mentions a timeout or a
+registry error, the registry was unreachable at 02:00; the next
+nightly retries on its own.
+
+### `openclaw update` refuses `--tag`
+
+OpenClaw does not accept `--tag` on the extended-stable channel.
+Mechanic skips the flag when `openclaw update status --json` reports
+that channel, but if it could not read the channel from that output it
+assumes stable and passes `--tag`. Set `MIN_UPDATE_AGE_DAYS=0` to get
+updates flowing again, and please open an issue with the output of
+`openclaw update status --json` (minus anything private) so we can fix
+the detection.
+
 ### Update fails with "unexpected packaged dist file dist/openclaw-install-guard"
 
 You're on npm 12, which blocks package install scripts unless the
@@ -424,7 +561,8 @@ to its pre-Mechanic state before walking away, run
 ## How it works
 
 Mechanic is a plain Python program with three dependencies (pexpect,
-python-dotenv, requests). It's explicitly NOT another OpenClaw skill
+python-dotenv, requests), all pinned by exact version and sha256 hash
+in `requirements.txt`. It's explicitly NOT another OpenClaw skill
 or agent: the whole point is that it keeps working when OpenClaw is
 broken, so it shares no dependencies, configs, or runtime with
 OpenClaw.
@@ -437,9 +575,11 @@ Two LaunchAgents do the work:
   Read-only; never mutates anything.
 - **Updater** fires once a night at 02:00 local. Snapshots
   `~/.openclaw` as a gzipped tar, checks whether a newer OpenClaw
-  actually exists, and only runs `openclaw update --yes` when it does
-  (a same-version reinstall would replace every installed file and
-  wipe any local patches you have applied, for nothing). It then runs
+  actually exists, works out the newest release that has been public
+  for at least `MIN_UPDATE_AGE_DAYS`, and only runs `openclaw update
+  --yes --tag <that version>` when it is newer than what you have (a
+  same-version reinstall would replace every installed file and wipe
+  any local patches you have applied, for nothing). It then runs
   `openclaw doctor --fix --non-interactive`, re-runs your
   `POST_UPDATE_HOOK` patch script if a real update landed, verifies
   OpenClaw still responds, and sends the morning report, which always

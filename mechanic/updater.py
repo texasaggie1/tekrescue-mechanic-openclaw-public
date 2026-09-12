@@ -1,4 +1,4 @@
-"""Nightly update routine (v0.1.2).
+"""Nightly update routine (v0.1.4).
 
 Composes the steps documented in CLAUDE.md section 5:
 
@@ -17,8 +17,16 @@ Composes the steps documented in CLAUDE.md section 5:
      every morning). If the probe errors, we also skip: not touching the
      install is the safe default, and the supervisor heartbeat surfaces
      the same probe error six times a day.
-  5. When the gate passes, run `openclaw update --yes` via subprocess.run
-     with a clean env and stdin closed (CLAUDE.md section 8 hygiene).
+  4b. Release waiting period (new in v0.1.4): when an update exists, ask
+     release_age.plan_update which version, if any, has been public on the
+     npm registry for MIN_UPDATE_AGE_DAYS (default 7). OpenClaw releases
+     every two or three days, so the plan usually names an older release
+     than the one OpenClaw advertises, installed with `--tag`. Anything the
+     plan cannot establish (npm missing, registry unreachable) resolves to
+     "leave the install alone" and is spelled out in the morning report.
+  5. When the gate passes, run `openclaw update --yes` (plus `--tag
+     <version>` when the plan pins one) via subprocess.run with a clean
+     env and stdin closed (CLAUDE.md section 8 hygiene).
   6. Run `openclaw doctor --fix --non-interactive`, also via subprocess.run.
      PROMPT_MODE and KNOWN_PROMPTS are dormant under --non-interactive and
      reserved for v0.2 if/when we drop the flag.
@@ -59,6 +67,7 @@ from .doctor_runner import (
 )
 from .logging_setup import configure_logging
 from .notifier import send as notify_send
+from .release_age import plan_update
 from .reporter import RunReport, format_report, short_subject
 from .rollback import (
     InsufficientDiskError,
@@ -174,6 +183,7 @@ def run_updater(config: Config, *, test_fire: bool = False) -> int:
     # every file in dist/ and wipes operator-applied local patches, so we
     # never invoke it unless the registry really has something new.
     install_modified = False
+    waiting_note: Optional[str] = None
     if test_fire:
         update_summary = "skipped (--test-fire; openclaw update not invoked)"
     elif openclaw_was_broken:
@@ -194,13 +204,34 @@ def run_updater(config: Config, *, test_fire: bool = False) -> int:
             )
             _LOG.info("updater: %s", update_summary)
         else:
-            _LOG.info(
-                "updater: update available (%s -> %s); running openclaw update",
-                version_before or "unknown",
-                availability.latest_version or "unknown",
+            plan = plan_update(
+                config,
+                installed_version=version_before,
+                availability=availability,
             )
-            update_summary = _run_openclaw_update(config)
-            install_modified = True
+            waiting_note = (
+                f"Waiting period (MIN_UPDATE_AGE_DAYS="
+                f"{config.min_update_age_days}): {plan.reason}"
+            )
+            if not plan.install:
+                if plan.error:
+                    update_summary = "skipped (waiting period could not be applied; see notes)"
+                    _LOG.warning("updater: %s", plan.reason)
+                else:
+                    update_summary = "skipped (waiting period; see notes)"
+                    _LOG.info("updater: %s", plan.reason)
+            else:
+                _LOG.info(
+                    "updater: update available (%s -> %s); %s; running openclaw update",
+                    version_before or "unknown",
+                    plan.target_version or availability.latest_version or "unknown",
+                    plan.reason,
+                )
+                update_summary = _run_openclaw_update(
+                    config,
+                    target_version=plan.target_version if plan.use_tag else None,
+                )
+                install_modified = True
 
     # 6. Doctor.
     doctor_summary, doctor_result, doctor_aborted_prompt = _run_doctor_step(config)
@@ -290,6 +321,8 @@ def run_updater(config: Config, *, test_fire: bool = False) -> int:
         )
     if openclaw_was_broken:
         notes.append("OpenClaw was already unhealthy pre-update; update step was skipped.")
+    if waiting_note:
+        notes.append(waiting_note)
     if doctor_warning:
         notes.append(
             f"Doctor exited non-zero ({doctor_result.exit_code}) but OpenClaw "
@@ -324,8 +357,17 @@ def run_updater(config: Config, *, test_fire: bool = False) -> int:
     return 0
 
 
-def _run_openclaw_update(config: Config) -> str:
+def _run_openclaw_update(config: Config, *, target_version: Optional[str] = None) -> str:
+    """Run `openclaw update --yes`, pinned with `--tag` when the plan says so.
+
+    `--tag <version>` is OpenClaw's own one-shot override of the package
+    target; it does not change the saved update channel. It is how the
+    waiting period installs a release older than the advertised latest.
+    """
     cmd = [str(config.openclaw_bin_path), "update", "--yes"]
+    if target_version:
+        cmd += ["--tag", target_version]
+    label = "openclaw update" + (f" --tag {target_version}" if target_version else "")
     _LOG.info("updater: running %s", cmd)
     try:
         proc = subprocess.run(
@@ -338,22 +380,23 @@ def _run_openclaw_update(config: Config) -> str:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return f"openclaw update timed out after {UPDATE_TIMEOUT_SECONDS}s"
+        return f"{label} timed out after {UPDATE_TIMEOUT_SECONDS}s"
     except OSError as exc:
-        return f"openclaw update could not be invoked: {exc}"
+        return f"{label} could not be invoked: {exc}"
     new_version = extract_version(proc.stdout) or extract_version(proc.stderr)
     if proc.returncode == 0:
         if new_version:
-            return f"openclaw update exit 0 (reports {new_version})"
-        return "openclaw update exit 0"
+            return f"{label} exit 0 (reports {new_version})"
+        return f"{label} exit 0"
     _LOG.error(
-        "updater: openclaw update exit %s\n"
+        "updater: %s exit %s\n"
         "----- stdout -----\n%s\n----- stderr -----\n%s\n------------------",
+        label,
         proc.returncode,
         proc.stdout or "<empty>",
         proc.stderr or "<empty>",
     )
-    return f"openclaw update exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:200]}"
+    return f"{label} exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:200]}"
 
 
 def _run_post_update_hook(config: Config) -> str:

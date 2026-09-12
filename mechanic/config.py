@@ -40,6 +40,7 @@ _MECHANIC_ENV_VARS = (
     "OPENCLAW_BIN_PATH",
     "OPENCLAW_CONFIG_PATH",
     "UPDATE_TIME",
+    "MIN_UPDATE_AGE_DAYS",
     "SUPERVISOR_INTERVAL_MINUTES",
     "PROMPT_MODE",
     "SNAPSHOT_RETENTION_DAYS",
@@ -114,6 +115,7 @@ class Config:
     openclaw_bin_path: Path
     openclaw_config_path: Path
     update_time: str
+    min_update_age_days: int
     supervisor_interval_minutes: int
     prompt_mode: str
     snapshot_retention_days: int
@@ -166,6 +168,10 @@ def load_config(env_file: Path | None = None) -> Config:
             f"UPDATE_TIME must be HH:MM in 24h time. Got: {update_time!r}."
         )
 
+    # Supply-chain waiting period (v0.1.4): a release must have been public
+    # on the npm registry for this many days before Mechanic installs it.
+    # 0 turns the wait off. See release_age.py for the reasoning.
+    min_update_age = _env_int("MIN_UPDATE_AGE_DAYS", default=7, min_value=0)
     interval = _env_int("SUPERVISOR_INTERVAL_MINUTES", default=240, min_value=1)
     retention = _env_int("SNAPSHOT_RETENTION_DAYS", default=14, min_value=1)
     min_free_mb = _env_int("MIN_FREE_DISK_MB_FOR_SNAPSHOT", default=500, min_value=1)
@@ -198,6 +204,7 @@ def load_config(env_file: Path | None = None) -> Config:
         openclaw_bin_path=Path(bin_raw).expanduser(),
         openclaw_config_path=Path(cfg_raw).expanduser(),
         update_time=update_time,
+        min_update_age_days=min_update_age,
         supervisor_interval_minutes=interval,
         prompt_mode=prompt_mode,
         snapshot_retention_days=retention,

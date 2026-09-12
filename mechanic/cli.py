@@ -148,6 +148,7 @@ def _print_status(config: Config) -> None:
         f"({_path_state(config.openclaw_config_path, kind='dir')})"
     )
     print(f"  update time:         {config.update_time} local")
+    print(f"  min update age:      {_min_update_age_state(config)}")
     print(f"  supervisor interval: {config.supervisor_interval_minutes} min")
     print(f"  prompt mode:         {config.prompt_mode}")
     print(f"  snapshot retention:  {config.snapshot_retention_days} days")
@@ -176,6 +177,22 @@ def _print_status(config: Config) -> None:
 
     print(f"Recent log ({LOG_FILE}):")
     _print_tail(LOG_FILE, lines=10)
+
+
+def _min_update_age_state(config: Config) -> str:
+    """Describe the release waiting period and whether npm can serve it."""
+    from .release_age import find_npm
+
+    days = config.min_update_age_days
+    if days <= 0:
+        return "0 days (waiting period off)"
+    npm = find_npm(config)
+    if npm is None:
+        return (
+            f"{days} days (npm NOT found next to openclaw or on PATH; "
+            f"updates wait until it is)"
+        )
+    return f"{days} days (npm: {npm})"
 
 
 def _path_state(path: Path, *, kind: str) -> str:
