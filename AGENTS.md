@@ -398,6 +398,16 @@ this file as part of the same commit.
 6. Update SESSIONS.md (and this file, when permanent knowledge changed)
    before every push. The session is not over until the commits land.
 
+### Maintainer tooling
+
+`scripts/maintainer/sync-from-public.sh` is for a maintainer who keeps
+this repo checked out as a `public/` subfolder of an upstream checkout.
+Run from the upstream root, it mirrors the product files from `public/`
+into the upstream tree while keeping the upstream's own repo links, its
+`.gitignore` entry for `public/`, and its personalised recovery scripts,
+and it strips the two README sections that only make sense here. It
+commits nothing. It exists because v0.2.0 was built here first.
+
 ## 9. Out of scope (v0.2.x)
 
 Linux/Windows support, a GUI, Mechanic auto-updating itself, telemetry,

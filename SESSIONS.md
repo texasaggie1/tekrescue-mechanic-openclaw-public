@@ -171,6 +171,10 @@ Exact next steps, in order (steps 1 to 4 done):
   heartbeat, Telegram delivery. 84 tests.
 - The operator's .env lists TARGETS=hermes only; Mechanic on that machine
   never constructs the OpenClaw target.
+- Added `scripts/maintainer/sync-from-public.sh` (AGENTS.md section 8) so
+  the maintainer's upstream checkout can adopt a release built here
+  first, keeping its own deltas. Proven on a scratch copy of that
+  checkout: 33 files, 84 tests green in the adopted tree.
 
 ### Current state
 v0.2.0 is on main and running unattended on the operator's Mac mini for
