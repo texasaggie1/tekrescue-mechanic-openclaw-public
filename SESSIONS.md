@@ -97,10 +97,15 @@ Be honest about half-finished work.
 
 ### Current state
 Code complete, unit-tested, and simulated. NOT run against a live Hermes
-or a live OpenClaw. Assumed, not confirmed: Randy's Hermes on the Mac mini
-is a source install (checkout at ~/.hermes/hermes-agent, launcher at
-~/.local/bin/hermes). A Desktop bundle has no checkout and cannot be
-pinned; `mechanic status` will say so on the "source checkout" line.
+or a live OpenClaw. Confirmed on the Mac mini 2026-10-04 (round 1 of the
+supervised walkthrough): Hermes IS a source install (launcher
+/Users/openclaw/.local/bin/hermes, checkout ~/.hermes/hermes-agent, git
+method, Python 3.14.7), clean working tree, HEAD 98d8ea7 at release date
+2026.9.24 and 430 commits behind main; `git describe` there preferred a
+canary tag, so describe_head now excludes `*+*` and `*-*`. Clawgustus
+(ai.openclaw.gateway, PID 32399) still running and enabled. Two operator
+LaunchAgents sit beside Mechanic: com.texasaggie1.hermes-gateway-watchdog
+and com.texasaggie1.michael-hermes-backup (last exit 1).
 Unverified on a real Mac: that `hermes pm install` after a bare checkout
 leaves the launcher and the launchd plist pointing at a working
 environment generation; that `hermes --version` reports the tag after a

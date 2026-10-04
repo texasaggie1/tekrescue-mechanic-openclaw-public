@@ -192,6 +192,9 @@ class GitPlumbingTests(HermesRepoTestCase):
         self.assertFalse(is_ancestor(self.settings, self.repo.commits["c3"], self.repo.commits["c2"]))
         self.checkout("main")
         self.assertTrue(describe_head(self.settings).startswith("v2026.10.3+1.g"))
+        # The canary and rc tags exist on this history but must never be the label.
+        git("tag", "v0.99.0+canary.20261004T000000Z", "main", cwd=self.repo.source)
+        self.assertTrue(describe_head(self.settings).startswith("v2026.10.3+1.g"))
 
 
 class LedgerTests(HermesRepoTestCase):

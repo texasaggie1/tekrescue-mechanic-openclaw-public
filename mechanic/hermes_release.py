@@ -355,7 +355,13 @@ def describe_head(spec: HermesSettings, upstream: Optional[dict[str, str]] = Non
         exact = [t for t, sha in upstream.items() if sha == head and RELEASE_TAG_RE.match(t)]
         if exact:
             return max(exact, key=version_key)
-    result = _git(spec, "describe", "--tags", "--long", "--match", "v*")
+    # Release tags only: canary builds (v0.21.4+canary.<stamp>) and release
+    # candidates (v2026.9.21-rc.1) also start with v and would win on a
+    # real install (seen on the Mac mini, 2026-10-04).
+    result = _git(
+        spec, "describe", "--tags", "--long", "--match", "v*",
+        "--exclude", "*+*", "--exclude", "*-*",
+    )
     if not result.ok:
         return f"untagged ({(head or 'unknown')[:12]})"
     text = result.stdout.strip()
