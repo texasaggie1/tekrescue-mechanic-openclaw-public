@@ -677,6 +677,24 @@ A service you loaded over SSH lives in `user/$(id -u)`, not `gui/$(id
 -u)`; use whichever domain `launchctl print <domain>/<label>` answers
 for. Mechanic checks both.
 
+Before the bootout, check what else the gateway started. A local model
+server such as Ollama that the gateway spawned dies with it, and
+anything else on the machine that uses that server (a memory or
+embedding service, another agent) loses it at the same moment. Find the
+parent of each such process:
+
+```bash
+pgrep -x ollama | while read p; do ps -o pid=,ppid=,comm= -p "$p"; ps -o pid=,comm= -p "$(ps -o ppid= -p "$p")"; done
+```
+
+A parent of `launchd` (pid 1) with its own LaunchAgent, or the vendor's
+menu bar app listed in your login items, means it starts on its own.
+A parent that is the gateway's `node` process means it does not: give
+it its own start (the vendor app as a login item, or a Homebrew service)
+and confirm it is listening after a reboot, then do the bootout.
+Mechanic never starts, stops, or probes anything but the gateways it is
+told about in `TARGETS`.
+
 ### Mechanic says the gateway is DOWN but it is running
 
 A LaunchAgent lives in one of two per-user launchd domains: `gui/<uid>`

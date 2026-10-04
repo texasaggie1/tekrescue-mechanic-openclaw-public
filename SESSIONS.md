@@ -244,6 +244,10 @@ Exact next steps, in order (round 6 onward; rounds 1 to 5 done):
      (nested `.git`, venvs, caches, nested `backups/`, `models`,
      `runtimes`, `node`), resolved by a walk before tar runs, and the
      restore carries every such directory back over.
+- Round 5 (13:34 local): the same nightly on the fixed code, STATUS
+  SUCCESS; numbers in the Resume block. README's shutdown guidance now
+  tells operators to check what the gateway spawned (a local model
+  server, for one) before a bootout, from the operator's Ollama note.
 
 ### Current state
 Code complete, unit-tested (84), simulated, and run ONCE against the live
