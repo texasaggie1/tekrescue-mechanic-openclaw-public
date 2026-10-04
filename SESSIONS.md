@@ -77,7 +77,7 @@ The Mac mini (user `openclaw`, uid 502):
   Gateway `ai.hermes.gateway` pid 37096, alive, in launchd domain
   `user/502` (NOT gui/502). Operator agents beside it:
   `com.texasaggie1.hermes-gateway-watchdog` (keep; it is why autoheal
-  stays off) and `com.texasaggie1.michael-hermes-backup` (last exit 1,
+  stays off) and a second operator agent that backs up Hermes (last exit 1,
   not ours, mention only).
 - OpenClaw: `ai.openclaw.gateway` still running and enabled in gui/502.
   The operator wants it OFF; that is the last step below.
@@ -103,7 +103,25 @@ Exact next steps, in order (round 6 onward; rounds 1 to 5 done):
 4. Merge this branch to main (fast-forward), SESSIONS.md updated in the
    same commit, scrub check before push (zero hits for IPs, the agent
    names, hostnames, personal emails).
-5. Take the OpenClaw agent offline, disable before bootout, in the
+5. BEFORE taking the OpenClaw agent offline, check who starts Ollama.
+   Operator note (2026-10-04, from their Hermes session): Ollama must
+   keep running on port 11434 after OpenClaw goes down; the operator's
+   local Honcho memory server uses it for embeddings (nomic-embed-text).
+   Mechanic never starts, stops, or probes Ollama (grep confirms no
+   reference in the code). If `ollama serve` turns out to be a child of
+   the OpenClaw gateway process, `launchctl bootout` of the gateway kills
+   it too; in that case make Ollama start on its own first (the Ollama
+   app as a login item, or `brew services start ollama`, which installs
+   a LaunchAgent) and confirm `lsof -nP -iTCP:11434 -sTCP:LISTEN` after
+   a logout/login or a reboot. Pre-flight on the Mac:
+   `pgrep -fl ollama`, `lsof -nP -iTCP:11434 -sTCP:LISTEN`, the parent
+   of each ollama pid (`ps -o pid=,ppid=,comm=`), `launchctl list | grep
+   -i ollama`, `brew services list | grep -i ollama`, and the login
+   items (`osascript -e 'tell application "System Events" to get the
+   name of every login item'`). Parent launchd (ppid 1) with an Ollama
+   or Homebrew LaunchAgent, or the Ollama app in login items, means it
+   is independent of OpenClaw.
+   Then take the OpenClaw agent offline, disable before bootout, in the
    domain it lives in: `launchctl print gui/502/ai.openclaw.gateway`
    (fall back to user/502), then `launchctl disable <domain>/ai.openclaw.gateway
    && launchctl bootout <domain>/ai.openclaw.gateway`; verify with
@@ -243,7 +261,7 @@ method, Python 3.14.7), clean working tree, HEAD 98d8ea7 at release date
 canary tag, so describe_head now excludes `*+*` and `*-*`. The OpenClaw
 gateway (ai.openclaw.gateway) was still running and enabled. Two operator
 LaunchAgents sit beside Mechanic: com.texasaggie1.hermes-gateway-watchdog
-and com.texasaggie1.michael-hermes-backup (last exit 1).
+and a second one that backs up Hermes (last exit 1).
 Unverified on a real Mac: that `hermes pm install` after a bare checkout
 leaves the launcher and the launchd plist pointing at a working
 environment generation; that `hermes --version` reports the tag after a
