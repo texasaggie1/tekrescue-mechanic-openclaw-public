@@ -60,23 +60,59 @@ def send(config: Config, subject: str, body: str) -> NotifyResult:
         return NotifyResult(kind=kind, delivered=False, error=str(exc))
 
 
+# Telegram caps a message at 4096 characters; stay under it with margin.
+TELEGRAM_CHUNK_CHARS = 3900
+
+
 def _send_telegram(config: Config, subject: str, body: str) -> NotifyResult:
+    """Send as plain text, in chunks.
+
+    No parse_mode on purpose: Telegram's Markdown parser rejects any report
+    that contains an unpaired `_`, `*` or backtick, and the morning report
+    quotes commands and environment variable names (seen 2026-10-04:
+    HTTP 400 "can't parse entities"). Plain text always delivers.
+    """
     n = config.notifier
     assert n.telegram_bot_token and n.telegram_chat_id
     url = f"https://api.telegram.org/bot{n.telegram_bot_token}/sendMessage"
-    text = f"*{subject}*\n\n{body}"
-    resp = requests.post(
-        url,
-        json={"chat_id": n.telegram_chat_id, "text": text, "parse_mode": "Markdown"},
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        return NotifyResult(
-            kind="telegram",
-            delivered=False,
-            error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+    chunks = split_message(f"{subject}\n\n{body}", TELEGRAM_CHUNK_CHARS)
+    for index, chunk in enumerate(chunks):
+        text = chunk if len(chunks) == 1 else f"({index + 1}/{len(chunks)}) {chunk}"
+        resp = requests.post(
+            url,
+            json={"chat_id": n.telegram_chat_id, "text": text},
+            timeout=10,
         )
+        if resp.status_code != 200:
+            return NotifyResult(
+                kind="telegram",
+                delivered=False,
+                error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+            )
     return NotifyResult(kind="telegram", delivered=True)
+
+
+def split_message(text: str, limit: int) -> list[str]:
+    """Split on line boundaries so no chunk exceeds `limit` characters."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(current) + len(line) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _send_slack(config: Config, subject: str, body: str) -> NotifyResult:

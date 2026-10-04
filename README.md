@@ -673,6 +673,27 @@ next supervisor tick. To keep a product down:
 Do both if you want belt and braces. `launchctl enable` and a `TARGETS`
 edit bring it back.
 
+A service you loaded over SSH lives in `user/$(id -u)`, not `gui/$(id
+-u)`; use whichever domain `launchctl print <domain>/<label>` answers
+for. Mechanic checks both.
+
+### Mechanic says the gateway is DOWN but it is running
+
+A LaunchAgent lives in one of two per-user launchd domains: `gui/<uid>`
+when a desktop login session loaded it, `user/<uid>` when an SSH session
+did. Before 0.2.0 Mechanic only asked `gui`, so a gateway loaded over
+SSH (common on a headless Mac mini) read as down even with a live pid in
+`launchctl list`. Mechanic now asks both domains, restarts a service in
+the domain it lives in, and reads the disabled flag from both. If you
+still see it on 0.2.0 or later, run
+
+```bash
+launchctl print gui/$(id -u)/ai.hermes.gateway | grep -E 'pid|state'
+launchctl print user/$(id -u)/ai.hermes.gateway | grep -E 'pid|state'
+```
+
+and open an issue with both outputs.
+
 ### Hermes: "already ahead of vX, Mechanic never downgrades"
 
 Someone ran `hermes update` (or Hermes ran `/update` from chat), so the

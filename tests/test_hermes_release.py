@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mechanic.config import HermesSettings
+from mechanic import hermes_release
 from mechanic.hermes_release import (
     MODE_HERMES_UPDATE,
     MODE_RELEASE_TAG,
@@ -372,6 +373,51 @@ class ScanAndApplyTests(HermesRepoTestCase):
         self.assertEqual(head_commit(self.settings), self.repo.commits["c1"])
         self.assertEqual(result.code_after, self.repo.commits["c1"])
         self.assertIn("checkout put back on", result.summary)
+
+
+class DoctorSummaryTests(unittest.TestCase):
+    """The Doctor line of the report is one plain line, never doctor's findings."""
+
+    DOCTOR_FIX_OUTPUT = (
+        "\x1b[1mHermes Doctor\x1b[0m\n"
+        "  \x1b[32m\u2713 Python 3.12\x1b[0m\n"
+        "\x1b[32m\u2500\u2500\u2500\u2500\u2500\u2500\x1b[0m\n"
+        "\x1b[32m\x1b[1m  Fixed 1 issue(s).\x1b[0m\x1b[33m\x1b[1m 5 issue(s) require manual intervention.\x1b[0m\n\n"
+        "  1. gateway.pid stale\n"
+        "  5. session_reset.mode: both is no longer applied: run `hermes plugins install x`.\n\n"
+    )
+
+    def test_fix_summary_counts_findings_without_repeating_them(self) -> None:
+        result = hermes_release.CommandResult(ok=False, exit_code=1, stdout=self.DOCTOR_FIX_OUTPUT, stderr="")
+        line, ok = hermes_release.summarize_doctor("hermes doctor --fix", result)
+        self.assertFalse(ok)
+        self.assertEqual(
+            line,
+            "hermes doctor --fix exit 1: fixed 1, 5 finding(s) need the operator "
+            "(run `hermes doctor` to read them)",
+        )
+        self.assertNotIn("\n", line)
+        self.assertNotIn("\x1b", line)
+        self.assertNotIn("session_reset", line)
+
+    def test_read_only_summary(self) -> None:
+        out = "\x1b[33m  Found 3 issue(s) to address:\x1b[0m\n\n  1. a\n  2. b\n  3. c\n"
+        result = hermes_release.CommandResult(ok=False, exit_code=1, stdout=out, stderr="")
+        line, ok = hermes_release.summarize_doctor("hermes doctor", result)
+        self.assertEqual(line, "hermes doctor exit 1: 3 finding(s) need the operator (run `hermes doctor` to read them)")
+
+    def test_clean_run_and_unrecognised_output(self) -> None:
+        result = hermes_release.CommandResult(ok=True, exit_code=0, stdout="All checks passed!", stderr="")
+        self.assertEqual(hermes_release.summarize_doctor("hermes doctor", result), ("hermes doctor exit 0", True))
+        result = hermes_release.CommandResult(ok=False, exit_code=2, stdout="", stderr="boom\r\nline two\x1b[0m")
+        line, ok = hermes_release.summarize_doctor("hermes doctor", result)
+        self.assertEqual(line, "hermes doctor exit 2: boom line two")
+
+    def test_plain_text_strips_escapes_and_control_characters(self) -> None:
+        raw = "\x1b[2K\rprogress 10%\x1b[1A\x1b]0;title\x07done\n\tnext"
+        self.assertEqual(hermes_release.plain_text(raw), "progress 10%done next")
+        tail = hermes_release.CommandResult(ok=False, exit_code=1, stdout="a\nb\n\nc", stderr="").tail()
+        self.assertEqual(tail, "a b c")
 
 
 if __name__ == "__main__":

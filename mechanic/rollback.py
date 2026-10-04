@@ -52,6 +52,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -93,10 +94,22 @@ HERMES_EXCLUDES = (
     "hermes-agent", "installs", "tools", "cache", ".cache", "backups", "logs",
     "state-snapshots", "browser_profiles", "browser-profiles", "browser-profile",
     "checkpoints", "node_modules", ".venv", "venv",
+    # Hermes-managed runtime downloads (its own backup skips these too).
+    "models", "runtimes", "node",
 )
-# Patterns excluded at any depth (bsdtar and GNU tar both match these
-# against the path tail).
-HERMES_EXCLUDE_PATTERNS = ("*/__pycache__", "*/node_modules", "*/.venv")
+# Directory names excluded at ANY depth, mirroring `hermes backup`'s own
+# list: nested git checkouts (skills, plugins), dependency trees, caches,
+# and prior backups nested inside profiles. Resolved by walking the tree
+# before tar runs, so the exclusion does not depend on how bsdtar or GNU
+# tar read a wildcard. Restore carries every such directory over from
+# the live tree, exactly like the top-level excludes.
+HERMES_EXCLUDE_ANYWHERE = (
+    ".git", "__pycache__", "node_modules", "backups", "state-snapshots",
+    "checkpoints", "browser-profiles", "browser-profile", ".venv", "venv",
+    "site-packages", ".cache", ".tox", ".nox", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache",
+)
+HERMES_EXCLUDE_PATTERNS = ()
 # SQLite databases captured with the online backup API instead of tar.
 HERMES_SQLITE_GLOBS = ("*.db", "cron/*.db")
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -129,6 +142,8 @@ class SnapshotStore:
     source: Path
     excludes: tuple[str, ...] = ()
     exclude_patterns: tuple[str, ...] = ()
+    #: Directory names excluded wherever they occur below `source`.
+    exclude_anywhere: tuple[str, ...] = ()
     #: Globs (relative to `source`) of SQLite databases to copy with the
     #: online backup API rather than tar. Their live files and sidecars are
     #: excluded from the archive.
@@ -167,6 +182,7 @@ def hermes_store(config: Config) -> SnapshotStore:
         source=config.hermes.home,
         excludes=HERMES_EXCLUDES,
         exclude_patterns=HERMES_EXCLUDE_PATTERNS,
+        exclude_anywhere=HERMES_EXCLUDE_ANYWHERE,
         sqlite_globs=HERMES_SQLITE_GLOBS,
     )
 
@@ -379,7 +395,7 @@ def capture_snapshot(
         databases = _snapshot_sqlite(store, tmp_dir / SQLITE_DIRNAME)
         _run_tar_create(
             source, archive_tmp,
-            excludes=store.excludes,
+            excludes=store.excludes + _nested_excludes(store),
             exclude_patterns=store.exclude_patterns + _sqlite_tar_excludes(store, databases),
         )
         metadata = {
@@ -455,6 +471,7 @@ def restore_snapshot(store: SnapshotStore, snapshot: Snapshot) -> None:
         _run_tar_extract(snapshot.archive_path, into=target.parent, strip_to=target.name)
         if backup is not None:
             _carry_over_excluded(backup, target, store.excludes)
+            _carry_over_nested(backup, target, store)
         _restore_sqlite(snapshot, target)
     except Exception:
         if backup is not None and not _has_meaningful_content(target):
@@ -558,7 +575,12 @@ def _run_tar_create(
         cmd.extend(["--exclude", pattern])
     cmd.extend(["-C", str(parent), basename])
 
-    _LOG.info("snapshot: %s", " ".join(cmd))
+    if len(excludes) + len(exclude_patterns) > 40:
+        shown = cmd[:3] + [f"[{len(excludes) + len(exclude_patterns)} --exclude entries]"] + cmd[-3:]
+        _LOG.info("snapshot: %s", " ".join(shown))
+        _LOG.debug("snapshot: %s", " ".join(cmd))
+    else:
+        _LOG.info("snapshot: %s", " ".join(cmd))
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -630,6 +652,33 @@ def _run_tar_extract(archive: Path, *, into: Path, strip_to: str) -> None:
             f"tar extract completed but {final} does not exist. "
             f"Archive may have been written with the wrong top-level name."
         )
+
+
+def _nested_excludes(store: SnapshotStore) -> tuple[str, ...]:
+    """Relative paths of every `exclude_anywhere` directory below source.
+
+    Walks the tree once, never descending into an excluded directory, so
+    the result is a short explicit list tar needs no wildcard rules for.
+    """
+    if not store.exclude_anywhere:
+        return ()
+    names = set(store.exclude_anywhere)
+    top_skip = set(store.excludes)
+    found: list[str] = []
+    root = store.source
+    for current, dirs, _files in os.walk(root):
+        rel_dir = Path(current).relative_to(root)
+        keep: list[str] = []
+        for name in sorted(dirs):
+            rel = (rel_dir / name) if str(rel_dir) != "." else Path(name)
+            if str(rel_dir) == "." and name in top_skip:
+                continue  # already excluded at the top level
+            if name in names:
+                found.append(str(rel))
+                continue
+            keep.append(name)
+        dirs[:] = keep
+    return tuple(found)
 
 
 def _sqlite_files(store: SnapshotStore) -> list[Path]:
@@ -737,6 +786,27 @@ def _carry_over_excluded(backup: Path, target: Path, excludes: tuple[str, ...]) 
         dst = target / name
         if not src.exists() or dst.exists():
             continue
+        src.rename(dst)
+        _LOG.info("restore: kept %s in place (excluded from archives)", dst)
+
+
+def _carry_over_nested(backup: Path, target: Path, store: SnapshotStore) -> None:
+    """Move the never-archived nested directories back as well.
+
+    These are the `exclude_anywhere` names found below the live tree
+    (skill checkouts' .git, plugin venvs, caches). Each goes back under
+    the same relative path when the archive did not also contain it.
+    """
+    walked = SnapshotStore(
+        name=store.name, root=store.root, source=backup, excludes=store.excludes,
+        exclude_anywhere=store.exclude_anywhere,
+    )
+    for rel in _nested_excludes(walked):
+        src = backup / rel
+        dst = target / rel
+        if not src.exists() or dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
         _LOG.info("restore: kept %s in place (excluded from archives)", dst)
 

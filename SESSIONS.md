@@ -122,11 +122,43 @@ Be honest about half-finished work.
   watchdog (every 5 min, hourly cooldown, kickstart only when the process
   is gone or a platform connection has failed for 15 min) coexists with
   Mechanic's drain-first restart; HERMES_GATEWAY_AUTOHEAL stays off.
+- Round 4: the first real `mechanic run-now --target hermes` on the Mac
+  mini (2026-10-04 12:21 local). What worked: the SQLite online backup
+  (state.db in 11 s, 204 MB gzipped), the tar (16 s), the planner
+  (waited, correctly), `hermes doctor --fix`. What failed, all fixed in
+  this commit with 17 new tests (84 total):
+  1. The gateway was reported DOWN with a live pid. `launchctl print
+     gui/502/ai.hermes.gateway` said "Could not find service" because the
+     Hermes agent lives in `user/502` (loaded over SSH); OpenClaw's lives
+     in `gui/502`. `daemon.find_service` now asks both domains, self-heal
+     kicks the one the service lives in, a service nobody knows goes where
+     `launchctl managername` says (Hermes's own rule), `is_disabled` reads
+     both. Run ended STATUS: FAILED with consecutive_failures=1 and no LKG.
+  2. Telegram rejected the report (HTTP 400 "can't parse entities"): the
+     notifier sent Markdown and the text had backticks and underscores.
+     Plain text now, split under the 4096-character cap.
+  3. The `Doctor:` line carried a raw 200-character tail of doctor's
+     output, with ANSI colour codes and newlines, into the report. The
+     terminal rendering it scrambled the neighbouring lines (the version
+     line appeared to lose its last character; the log had the full
+     value both times). `plain_text` strips escapes, `summarize_doctor`
+     reports counts only ("fixed 1, 5 finding(s) need the operator").
+  4. The tar was 619 MB where `hermes backup` of the same home is 393 MB
+     with state.db inside it. Added Hermes's own any-depth exclusion list
+     (nested `.git`, venvs, caches, nested `backups/`, `models`,
+     `runtimes`, `node`), resolved by a walk before tar runs, and the
+     restore carries every such directory back over.
 
 ### Current state
-Code complete, unit-tested, and simulated. NOT run against a live Hermes
-or a live OpenClaw. Confirmed on the Mac mini 2026-10-04 (round 1 of the
-supervised walkthrough): Hermes IS a source install (launcher
+Code complete, unit-tested (84), simulated, and run ONCE against the live
+Hermes on the Mac mini (round 4 above): snapshot, plan, and doctor are
+proven there; the run's verdict was a false FAILED from the launchd
+domain defect. The fixes in this commit have not yet been run on the
+Mac; the next run should end STATUS: SUCCESS with "Gateway running (pid
+N)" and a delivered Telegram report, after which `capture-first-good`
+writes the first sticky snapshot. The Hermes state file on the Mac holds
+consecutive_failures=1 until then. Confirmed on the Mac mini 2026-10-04
+(round 1 of the supervised walkthrough): Hermes IS a source install (launcher
 /Users/openclaw/.local/bin/hermes, checkout ~/.hermes/hermes-agent, git
 method, Python 3.14.7), clean working tree, HEAD 98d8ea7 at release date
 2026.9.24 and 430 commits behind main; `git describe` there preferred a
@@ -175,16 +207,15 @@ tag fetch then lazily pulls blobs). The 2026-09-12 OpenClaw caveats
   switch to pinning the stable head instead of date tags?
 
 ### Next session should
-1. On the Mac mini, with Randy watching: set `TARGETS=hermes` (plus
-   openclaw if wanted), `pip install --require-hashes -r requirements.txt`
-   and `pip install --no-build-isolation --no-deps -e .` in the venv,
-   `mechanic status`, `mechanic plan`, `hermes backup`, then
-   `mechanic run-now --target hermes`. Confirm the pin, `hermes --version`,
-   `hermes gateway status`, and the report; capture the real
-   `hermes --version` and `hermes pm status` output for the test fixtures.
-2. Merge to main once the supervised run passes, then disable the OpenClaw gateway
-   with `launchctl disable` + `bootout` and confirm the next heartbeat
-   reports it as operator-disabled.
+1. On the Mac mini: `git pull` in `public/`, re-run `mechanic run-now
+   --target hermes`, confirm STATUS: SUCCESS, "Gateway running (pid N)",
+   a one-line Doctor summary, a Telegram delivery, and a smaller tar; then
+   `mechanic capture-first-good --target hermes` and one
+   `mechanic-supervisor` tick. Capture the real `hermes --version` and
+   `hermes pm status` output for the test fixtures.
+2. Merge to main once that run passes, then disable the OpenClaw gateway
+   with `launchctl disable` + `bootout` (check which domain it lives in
+   first) and confirm the next heartbeat reports it as operator-disabled.
 3. Run `scripts/deps/relock.sh` for the idna/urllib3 bumps noted on
    2026-10-04 and record the moved versions.
 

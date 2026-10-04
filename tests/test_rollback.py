@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mechanic import rollback
 from mechanic.rollback import (
     KIND_LAST_KNOWN_GOOD,
     KIND_NIGHTLY,
@@ -128,6 +129,65 @@ def _tar_list(archive: Path) -> set[str]:
 
     with tarfile.open(archive, "r:gz") as tar:
         return {member.name for member in tar.getmembers()}
+
+
+class NestedExcludeTests(unittest.TestCase):
+    """Names excluded at any depth stay out of the tar and survive a restore."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="mechanic-nested-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.source = self.tmp / "hermes-home"
+        skill = self.source / "skills" / "weather"
+        (skill / ".git" / "objects").mkdir(parents=True)
+        (skill / "__pycache__").mkdir()
+        (self.source / "plugins" / "p" / ".venv" / "lib").mkdir(parents=True)
+        (self.source / "profiles" / "work" / "backups").mkdir(parents=True)
+        (self.source / "hermes-agent" / ".git").mkdir(parents=True)
+        (self.source / "config.yaml").write_text("v1\n")
+        (skill / "SKILL.md").write_text("skill\n")
+        (skill / ".git" / "objects" / "pack").write_text("git\n")
+        (skill / "__pycache__" / "x.pyc").write_text("pyc\n")
+        (self.source / "plugins" / "p" / "plugin.py").write_text("plugin\n")
+        (self.source / "plugins" / "p" / ".venv" / "lib" / "dep.py").write_text("dep\n")
+        (self.source / "profiles" / "work" / "backups" / "old.zip").write_text("zip\n")
+        (self.source / "profiles" / "work" / "notes.md").write_text("notes\n")
+        (self.source / "hermes-agent" / ".git" / "HEAD").write_text("ref\n")
+        self.store = SnapshotStore(
+            name="hermes", root=self.tmp / "snapshots" / "hermes", source=self.source,
+            excludes=("hermes-agent",),
+            exclude_anywhere=(".git", "__pycache__", ".venv", "backups"),
+        )
+
+    def test_walk_finds_nested_directories_but_not_under_top_level_excludes(self) -> None:
+        found = rollback._nested_excludes(self.store)
+        self.assertEqual(
+            set(found),
+            {"plugins/p/.venv", "profiles/work/backups", "skills/weather/.git", "skills/weather/__pycache__"},
+        )
+
+    def test_capture_leaves_them_out_and_restore_puts_them_back(self) -> None:
+        snap = capture_snapshot(self.store, kind=KIND_NIGHTLY, version="v1")
+        listing = _tar_list(snap.archive_path)
+        self.assertIn("hermes-home/skills/weather/SKILL.md", listing)
+        self.assertIn("hermes-home/plugins/p/plugin.py", listing)
+        self.assertIn("hermes-home/profiles/work/notes.md", listing)
+        for gone in (
+            "hermes-home/skills/weather/.git/objects/pack",
+            "hermes-home/skills/weather/__pycache__/x.pyc",
+            "hermes-home/plugins/p/.venv/lib/dep.py",
+            "hermes-home/profiles/work/backups/old.zip",
+            "hermes-home/hermes-agent/.git/HEAD",
+        ):
+            self.assertNotIn(gone, listing)
+
+        (self.source / "config.yaml").write_text("v2 broken\n")
+        restore_snapshot(self.store, snap)
+        self.assertEqual((self.source / "config.yaml").read_text(), "v1\n")
+        self.assertEqual((self.source / "skills" / "weather" / ".git" / "objects" / "pack").read_text(), "git\n")
+        self.assertEqual((self.source / "plugins" / "p" / ".venv" / "lib" / "dep.py").read_text(), "dep\n")
+        self.assertEqual((self.source / "profiles" / "work" / "backups" / "old.zip").read_text(), "zip\n")
+        self.assertEqual((self.source / "hermes-agent" / ".git" / "HEAD").read_text(), "ref\n")
 
 
 if __name__ == "__main__":

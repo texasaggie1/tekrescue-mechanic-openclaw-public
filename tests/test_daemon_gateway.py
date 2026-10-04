@@ -111,5 +111,117 @@ class SelfHealTests(unittest.TestCase):
                 daemon.ensure_running(label="ai.openclaw.gateway")
 
 
+PRINT_HERMES_RUNNING = "ai.hermes.gateway = {\n\tactive count = 1\n\tpid = 37096\n\tstate = running\n}\n"
+PRINT_HERMES_IDLE = "ai.hermes.gateway = {\n\tactive count = 0\n\tstate = not running\n}\n"
+NOT_FOUND = 'Could not find service "ai.hermes.gateway" in domain for user gui: 502\n'
+HERMES_DISABLED = 'disabled services = {\n\t"ai.hermes.gateway" => disabled\n}\n'
+NOTHING_DISABLED = "disabled services = {\n}\n"
+
+
+def domain_run(by_target: dict[str, tuple[int, str]], managername: str = "Background"):
+    """subprocess.run stand-in keyed on `verb target`, as launchctl sees it.
+
+    Models the 2026-10-04 Mac mini: the Hermes gateway lives in user/<uid>
+    (loaded over SSH) and gui/<uid> has never heard of it.
+    """
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        verb = cmd[1]
+        if verb == "managername":
+            return mock.Mock(returncode=0, stdout=managername + "\n", stderr="")
+        key = f"{verb} {cmd[2]}" if len(cmd) > 2 else verb
+        code, out = by_target.get(key, (0, ""))
+        return mock.Mock(returncode=code, stdout=out, stderr=out if code else "")
+
+    run.calls = calls  # type: ignore[attr-defined]
+    return run
+
+
+class LaunchdDomainTests(unittest.TestCase):
+    """A service loaded from an SSH session lives in user/<uid>, not gui/<uid>."""
+
+    def setUp(self) -> None:
+        self.gui, self.user = daemon.user_domains()
+        self.label = "ai.hermes.gateway"
+
+    def test_running_service_in_the_user_domain_is_found(self) -> None:
+        script = {
+            f"print {self.gui}/{self.label}": (113, NOT_FOUND),
+            f"print {self.user}/{self.label}": (0, PRINT_HERMES_RUNNING),
+        }
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run(script)):
+            self.assertEqual(daemon.find_service(self.label), (self.user, 37096))
+            self.assertEqual(daemon.running_pid(self.label), 37096)
+            check = daemon.check_gateway(self.label, autoheal=False)
+        self.assertTrue(check.ok)
+        self.assertEqual(check.summary(), "Gateway running (pid 37096).")
+
+    def test_unknown_in_both_domains_is_not_running(self) -> None:
+        script = {
+            f"print {self.gui}/{self.label}": (113, NOT_FOUND),
+            f"print {self.user}/{self.label}": (113, NOT_FOUND),
+        }
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run(script)):
+            self.assertEqual(daemon.find_service(self.label), (None, None))
+
+    def test_disabled_in_either_domain_counts(self) -> None:
+        script = {
+            f"print-disabled {self.gui}": (0, NOTHING_DISABLED),
+            f"print-disabled {self.user}": (0, HERMES_DISABLED),
+        }
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run(script)):
+            self.assertTrue(daemon.is_disabled(self.label))
+        script = {
+            f"print-disabled {self.gui}": (0, NOTHING_DISABLED),
+            f"print-disabled {self.user}": (0, NOTHING_DISABLED),
+        }
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run(script)):
+            self.assertFalse(daemon.is_disabled(self.label))
+        script = {
+            f"print-disabled {self.gui}": (1, ""),
+            f"print-disabled {self.user}": (1, ""),
+        }
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run(script)):
+            self.assertIsNone(daemon.is_disabled(self.label))
+
+    def test_self_heal_kicks_the_domain_the_service_lives_in(self) -> None:
+        answers = iter([(0, PRINT_HERMES_IDLE), (0, PRINT_HERMES_IDLE), (0, PRINT_HERMES_RUNNING)])
+
+        def run(cmd, **kwargs):
+            run.calls.append(list(cmd))
+            verb = cmd[1]
+            if verb == "print" and cmd[2] == f"{self.gui}/{self.label}":
+                return mock.Mock(returncode=113, stdout="", stderr=NOT_FOUND)
+            if verb == "print":
+                code, out = next(answers)
+                return mock.Mock(returncode=code, stdout=out, stderr="")
+            if verb == "print-disabled":
+                return mock.Mock(returncode=0, stdout=NOTHING_DISABLED, stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        run.calls = []  # type: ignore[attr-defined]
+
+        plist = mock.Mock(spec=Path)
+        plist.exists.return_value = True
+        plist.__str__ = lambda self_: "/fake/ai.hermes.gateway.plist"  # type: ignore[assignment]
+        with mock.patch("mechanic.daemon.plist_path_for", return_value=plist), \
+                mock.patch("mechanic.daemon.subprocess.run", run), \
+                mock.patch("mechanic.daemon.time.sleep"):
+            check = daemon.check_gateway(self.label, autoheal=True)
+        self.assertTrue(check.healed)
+        self.assertEqual(check.pid, 37096)
+        bootstrap = next(c for c in run.calls if c[1] == "bootstrap")
+        kickstart = next(c for c in run.calls if c[1] == "kickstart")
+        self.assertEqual(bootstrap[2], self.user)
+        self.assertEqual(kickstart[-1], f"{self.user}/{self.label}")
+
+    def test_default_domain_follows_the_session_manager(self) -> None:
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run({}, managername="Aqua")):
+            self.assertEqual(daemon.default_domain(), self.gui)
+        with mock.patch("mechanic.daemon.subprocess.run", domain_run({}, managername="Background")):
+            self.assertEqual(daemon.default_domain(), self.user)
+
+
 if __name__ == "__main__":
     unittest.main()

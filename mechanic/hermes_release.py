@@ -230,8 +230,27 @@ class CommandResult:
     error: Optional[str] = None
 
     def tail(self, limit: int = 200) -> str:
-        text = (self.stderr or self.stdout or self.error or "").strip()
+        """The last `limit` characters of output as one plain line.
+
+        Summaries land on one line of the morning report. Hermes prints
+        with ANSI colour and box-drawing characters; a raw tail once
+        carried those into the report and the terminal scrambled three
+        neighbouring lines while rendering it (2026-10-04).
+        """
+        text = plain_text(self.stderr or self.stdout or self.error or "")
         return text[-limit:] if len(text) > limit else text
+
+
+# Order matters: the OSC (title) and CSI (colour, cursor) forms must win
+# over the bare two-byte escape, or `ESC ]` would be eaten alone.
+_ANSI_RE = re.compile(r"\x1b\][^\x07]*\x07|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+
+def plain_text(text: str) -> str:
+    """Strip terminal escape sequences and collapse all whitespace to spaces."""
+    text = _ANSI_RE.sub("", text)
+    text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    return " ".join(text.split())
 
 
 def _run(cmd: list[str], *, cwd: Optional[Path] = None, timeout: int) -> CommandResult:
@@ -709,12 +728,42 @@ def run_doctor(spec: HermesSettings) -> tuple[str, bool]:
     """
     args = ["doctor", "--fix"] if spec.doctor_fix else ["doctor"]
     result = _hermes(spec, *args, timeout=DOCTOR_TIMEOUT_SECONDS)
-    label = "hermes " + " ".join(args)
+    return summarize_doctor("hermes " + " ".join(args), result)
+
+
+# `hermes doctor` ends with one of: "All checks passed!", "Found N issue(s)
+# to address:", or after --fix "Fixed N issue(s). M issue(s) require manual
+# intervention." It exits 1 whenever any finding remains, fixed or not.
+_DOCTOR_FIXED = re.compile(r"Fixed (\d+) issue\(s\)")
+_DOCTOR_REMAINING = re.compile(r"(\d+) issue\(s\) (?:to address|require manual intervention)")
+
+
+def summarize_doctor(label: str, result: CommandResult) -> tuple[str, bool]:
+    """One line for the report: exit code and how many findings doctor left.
+
+    The findings themselves are not repeated; they are Hermes's advice to
+    its operator, often several paragraphs, and `hermes doctor` shows
+    them on demand.
+    """
     if result.ok:
         return f"{label} exit 0", True
     if result.error:
         return f"{label} {result.error}", False
-    return f"{label} exit {result.exit_code}: {result.tail()}", False
+    text = plain_text(result.stdout or "")
+    fixed = _DOCTOR_FIXED.search(text)
+    remaining = _DOCTOR_REMAINING.search(text)
+    if fixed or remaining:
+        parts = []
+        if fixed:
+            parts.append(f"fixed {fixed.group(1)}")
+        if remaining:
+            parts.append(f"{remaining.group(1)} finding(s) need the operator")
+        return (
+            f"{label} exit {result.exit_code}: {', '.join(parts)} "
+            f"(run `hermes doctor` to read them)",
+            False,
+        )
+    return f"{label} exit {result.exit_code}: {result.tail(160)}", False
 
 
 def pm_status_ok(spec: HermesSettings) -> tuple[bool, str]:

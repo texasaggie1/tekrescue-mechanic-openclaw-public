@@ -82,13 +82,70 @@ def is_loaded(label: str = OPENCLAW_DAEMON_LABEL) -> bool:
 
 
 def gui_domain() -> str:
-    """launchd per-user domain for the current uid, e.g. 'gui/502'."""
+    """launchd GUI per-user domain for the current uid, e.g. 'gui/502'."""
     return f"gui/{os.getuid()}"
 
 
-def service_target(label: str) -> str:
+def user_domains() -> tuple[str, str]:
+    """The two per-user launchd domains an agent can live in.
+
+    `gui/<uid>` is where a login session's agents go. `user/<uid>` is where
+    an agent lands when it is loaded from a session with no GUI, such as an
+    SSH login, which is how a headless Mac mini gets managed. A service in
+    one is invisible to `launchctl print` in the other (found 2026-10-04:
+    the Hermes gateway lived in user/502 while OpenClaw's lived in gui/502).
+    """
+    uid = os.getuid()
+    return (f"gui/{uid}", f"user/{uid}")
+
+
+def service_target(label: str, domain: Optional[str] = None) -> str:
     """Fully-qualified launchd service target, e.g. 'gui/502/ai.openclaw.gateway'."""
-    return f"{gui_domain()}/{label}"
+    return f"{domain or gui_domain()}/{label}"
+
+
+def default_domain() -> str:
+    """Where a plist loaded from this session would land.
+
+    `launchctl managername` answers "Aqua" inside a GUI login session and
+    "Background" (or similar) for SSH and other headless sessions.
+    """
+    gui, user = user_domains()
+    try:
+        result = subprocess.run(
+            ["launchctl", "managername"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return gui
+    return gui if "Aqua" in (result.stdout or "") else user
+
+
+def find_service(label: str) -> tuple[Optional[str], Optional[int]]:
+    """(domain, pid) for the first per-user domain that knows `label`.
+
+    pid is None when the service is registered but has no live process.
+    (None, None) when no domain knows it, or launchctl is unavailable.
+    """
+    for domain in user_domains():
+        try:
+            result = subprocess.run(
+                ["launchctl", "print", service_target(label, domain)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None, None
+        if result.returncode != 0:
+            continue
+        match = re.search(r"^\s*pid\s*=\s*(\d+)", result.stdout, re.MULTILINE)
+        return domain, (int(match.group(1)) if match else None)
+    return None, None
 
 
 def running_pid(label: str) -> Optional[int]:
@@ -99,22 +156,10 @@ def running_pid(label: str) -> Optional[int]:
     only a `pid = N` line means a process is actually alive. The outages
     Mechanic failed to catch in 2026-07 and 2026-09 all left the service
     enabled-but-not-running, which `is_loaded()` and a `--version` probe
-    both report as fine.
+    both report as fine. Both per-user domains are consulted.
     """
-    try:
-        result = subprocess.run(
-            ["launchctl", "print", service_target(label)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    match = re.search(r"^\s*pid\s*=\s*(\d+)", result.stdout, re.MULTILINE)
-    return int(match.group(1)) if match else None
+    _, pid = find_service(label)
+    return pid
 
 
 def is_running(label: str) -> bool:
@@ -142,7 +187,7 @@ def ensure_running(
     service: a deliberate shutdown is not an outage.
     """
     plist_path = plist_path or plist_path_for(label)
-    pid = running_pid(label)
+    domain, pid = find_service(label)
     if pid is not None:
         return False, pid
 
@@ -155,13 +200,16 @@ def ensure_running(
             f"Cannot start {label}: plist {plist_path} does not exist."
         )
 
-    target = service_target(label)
+    # Kick it where it lives; a service nobody knows gets bootstrapped into
+    # the domain this session would have put it in (Hermes's own rule).
+    domain = domain or default_domain()
+    target = service_target(label, domain)
     _LOG.warning("daemon: %s is not running; restarting via %s", label, target)
 
     # Best effort: no-ops (non-zero) when already bootstrapped, which is fine.
     try:
         subprocess.run(
-            ["launchctl", "bootstrap", gui_domain(), str(plist_path)],
+            ["launchctl", "bootstrap", domain, str(plist_path)],
             capture_output=True,
             text=True,
             timeout=15,
@@ -277,27 +325,32 @@ def check_gateway(label: str, *, autoheal: bool = True) -> GatewayCheck:
 def is_disabled(label: str) -> Optional[bool]:
     """Whether the operator has `launchctl disable`d this user service.
 
-    Reads `launchctl print-disabled gui/<uid>`, whose output lists every
-    service with an explicit enabled/disabled override as
-    `"label" => disabled`. Returns True when the label is listed as
-    disabled, False when it is listed as enabled or not listed at all, and
-    None when launchctl is unavailable or the query failed (a non-macOS
-    test box, or a launchd that refused the query). Callers treat None as
-    "unknown, assume not disabled" and say so.
+    Reads `launchctl print-disabled` for both per-user domains (gui/<uid>
+    and user/<uid>); the output lists every service with an explicit
+    enabled/disabled override as `"label" => disabled`. Returns True when
+    the label is disabled in either domain, False when it is enabled or
+    not listed in both, and None when launchctl is unavailable or every
+    query failed (a non-macOS test box, or a launchd that refused).
+    Callers treat None as "unknown, assume not disabled" and say so.
     """
-    try:
-        result = subprocess.run(
-            ["launchctl", "print-disabled", f"gui/{os.getuid()}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    return parse_disabled(result.stdout).get(label, False)
+    answered = False
+    for domain in user_domains():
+        try:
+            result = subprocess.run(
+                ["launchctl", "print-disabled", domain],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if result.returncode != 0:
+            continue
+        answered = True
+        if parse_disabled(result.stdout).get(label, False):
+            return True
+    return False if answered else None
 
 
 def parse_disabled(output: str) -> dict[str, bool]:
@@ -375,7 +428,9 @@ def start(
     if is_disabled(label):
         raise DaemonControlError(
             f"{label} is disabled by the operator (launchctl disable); "
-            f"not starting it. Run `launchctl enable gui/{os.getuid()}/{label}` "
+            f"not starting it. Run `launchctl enable <domain>/{label}` "
+            f"(gui/{os.getuid()} or user/{os.getuid()}, whichever "
+            f"`launchctl print-disabled` lists it under) "
             f"first if you want it back."
         )
 

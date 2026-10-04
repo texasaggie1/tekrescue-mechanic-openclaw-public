@@ -154,6 +154,19 @@ and `hermes_tags.json`, the tag ledger).
   `OPENCLAW_GATEWAY_AUTOHEAL` defaults on; `HERMES_GATEWAY_AUTOHEAL`
   defaults off because Hermes operators tend to run their own watchdog
   and two healers fighting over one service helps nobody.
+- **A LaunchAgent lives in one of two per-user launchd domains, and
+  `launchctl print` only sees the one you name.** `gui/<uid>` holds what
+  a logged-in desktop session loads; `user/<uid>` holds what an SSH or
+  other headless session loads with the legacy `launchctl load`. On the
+  first real Hermes nightly (2026-10-04) the gateway was alive in
+  `user/502` while Mechanic asked `gui/502`, got "Could not find
+  service", and reported the gateway DOWN with a live pid in
+  `launchctl list`. OpenClaw's own installer bootstraps into `gui`, so
+  v0.1.4 never saw this. `daemon.find_service` now asks both domains,
+  self-heal kicks the domain the service lives in, a service nobody
+  knows is bootstrapped where `launchctl managername` says this session
+  would put it (Hermes's own rule), and `is_disabled` reads
+  `print-disabled` for both. Never query one domain and conclude.
 - **`openclaw doctor --fix` must run with
   `OPENCLAW_SERVICE_REPAIR_POLICY=external`** (doctor_runner.py, v0.1.4).
   Without it doctor stops the gateway to enter maintenance and then
@@ -226,6 +239,29 @@ and `hermes_tags.json`, the tag ledger).
   (gigabytes, all regenerable, all essential); `restore_snapshot` moves
   the excluded top-level entries back from the pre-restore copy. Found
   in simulation on 2026-10-04, before it ever ran on a real machine.
+  The same day's first real snapshot was 619 MB of tar against a
+  `hermes backup` of the same home a third that size, because nested
+  `.git` checkouts, plugin venvs, caches and prior backups sit below the
+  top level. `HERMES_EXCLUDE_ANYWHERE` mirrors Hermes's own any-depth
+  list; `_nested_excludes` walks the tree once before tar runs so the
+  exclusion never depends on how bsdtar reads a wildcard, and
+  `_carry_over_nested` puts every such directory back on restore.
+- **Anything that lands on one line of the morning report must be one
+  plain line.** `hermes doctor` prints with ANSI colour and box-drawing
+  characters and ends with a numbered findings list. The first real run
+  spliced a 200-character raw tail of that into the `Doctor:` line, and
+  the terminal rendering the escape codes scrambled the three lines
+  around it (the version line lost its last character on screen; the
+  log proved the value was intact). `CommandResult.tail` and
+  `summarize_doctor` now go through `plain_text`, which strips escape
+  sequences and collapses whitespace, and the Doctor line reports counts
+  ("fixed 1, 5 finding(s) need the operator"), never the findings.
+- **Telegram gets plain text.** The notifier used to send the report
+  with `parse_mode=Markdown`; the first report that quoted a command in
+  backticks and an env var with underscores came back HTTP 400 "can't
+  parse entities". `_send_telegram` sends plain text, split at line
+  boundaries under the 4096-character cap, numbered when split. Never
+  add a parse mode back without escaping every character it reserves.
 - **Subprocess hygiene**: every invocation of `openclaw` (or anything it
   spawns: npm, node, tar) must pass `env=clean_subprocess_env()` from
   `mechanic/config.py` and `stdin=subprocess.DEVNULL`. Mechanic and
