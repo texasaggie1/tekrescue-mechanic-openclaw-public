@@ -38,6 +38,61 @@ Be honest about half-finished work.
 
 ---
 
+## 2026-10-04 (UTC) - branch: main - v0.1.4 merged to main
+
+### What we did
+- Merged `claude/open-claw-version-delay-gr91ha` (commit 080aa19, v0.1.4:
+  one-week waiting period for OpenClaw updates, hash-locked Python
+  dependencies, first tests) into main as a fast-forward. No pull request
+  was used; main had not moved since 2026-08-31, so the history stays
+  linear.
+- CLAUDE.md now repeats the dependency-quarantine rule next to the two
+  rules it already carried (SESSIONS.md before every push; never an
+  OpenClaw skill).
+- Re-verified before merging, on 2026-10-04: all 11 pins in
+  `requirements.txt` still pass `scripts/deps/check_pin_age.py` (ages 47
+  days to 5.8 years, nothing yanked); the 22 unit tests pass.
+- Checked the OpenClaw registry the same day: `latest` is 2026.9.8
+  (published 2026-10-03), `extended-stable` moved to 2026.8.35, and
+  backports on the 2026.7.x and 2026.8.x lines now interleave with the
+  2026.9.x train (2026.7.34, 7.35, 9.6, 8.33, 9.7, 8.34, 8.35, 9.8 over
+  two weeks). Against that registry the planner picks 2026.9.6 (published
+  2026-09-23, 10 days old): 9.7 and 9.8 are too young and the backports
+  lose on version order. That is the designed behaviour.
+
+### Current state
+main carries v0.1.4. Everything in the 2026-09-12 entry's "Current state"
+still holds: the waiting period is tested in simulation and by unit tests
+only, the `openclaw update --yes --tag <version>` path has not been
+exercised on a live install, and the channel key in `openclaw update
+status --json` is unconfirmed (defensive read, default stable). Two pins
+have newer releases that are now old enough to take, idna 3.20 and
+urllib3 2.8.0; not bumped here because a merge is not the place for it.
+
+### Decisions made
+- Fast-forward merge rather than a merge commit: the public repo has had
+  a single linear history since v0.1.3 and the SESSIONS.md entries are
+  the record of what landed when.
+- No version bump for the merge itself; v0.1.4 is what was on the branch.
+- Dependency bumps (idna, urllib3) deferred to a session that runs
+  `scripts/deps/relock.sh` and records the moved versions, per AGENTS.md
+  section 6.
+
+### Open questions
+- Unchanged from 2026-09-12: live `--tag` behaviour, the channel key, and
+  OpenClaw's own unlocked npm dependency tree.
+
+### Next session should
+1. Run the first nightly with the waiting period supervised on the Mac
+   mini (`mechanic run-now` while watching), confirm the `--tag` install
+   and the morning report, then let the 02:00 fire take over.
+2. Save the real `openclaw update status --json` output (redacted) and
+   make `_extract_channel` exact; add it to the test fixture.
+3. Run `scripts/deps/relock.sh`, confirm it moves idna and urllib3 only,
+   run `check_pin_age.py`, and record the bump here.
+
+---
+
 ## 2026-09-12 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.1.4, one-week waiting period + locked dependencies
 
 ### What we did
