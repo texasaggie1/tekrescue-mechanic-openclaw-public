@@ -72,7 +72,6 @@ GIT_TIMEOUT_SECONDS = 180
 PM_INSTALL_TIMEOUT_SECONDS = 3600
 HERMES_UPDATE_TIMEOUT_SECONDS = 3600
 DOCTOR_TIMEOUT_SECONDS = 900
-BACKUP_TIMEOUT_SECONDS = 600
 
 TAG_LEDGER_FILE = RUNTIME_STATE_DIR / "hermes_tags.json"
 UPSTREAM_TAG_NAMESPACE = "refs/mechanic/upstream-tags/"
@@ -609,18 +608,6 @@ class ApplyResult:
     steps: list[str] = field(default_factory=list)
     code_after: Optional[str] = None
     rolled_back_code: bool = False
-
-
-def quick_backup(spec: HermesSettings) -> str:
-    """`hermes backup --quick`: Hermes's SQLite-safe copy of its state files.
-
-    Best effort. Mechanic's own tar archive is the authoritative snapshot;
-    this adds a consistent state.db copy inside it (see rollback.py).
-    """
-    result = _hermes(spec, "backup", "--quick", "--label", "mechanic", timeout=BACKUP_TIMEOUT_SECONDS)
-    if result.ok:
-        return "hermes backup --quick exit 0"
-    return f"hermes backup --quick FAILED ({result.tail()})"
 
 
 def apply_release_tag(spec: HermesSettings, plan: HermesPlan) -> ApplyResult:

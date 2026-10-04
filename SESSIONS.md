@@ -109,6 +109,19 @@ Be honest about half-finished work.
   private v0.1.4 self-heal in the supervisor, not OpenClaw's CLI, that
   restarted the booted-out gateway. Scrubbed the agent's name from this
   file per the private repo's sync rule. 66 tests.
+- Round 3 of the walkthrough, before the first nightly: `hermes doctor` on
+  the Mac showed state.db at 638 MB and `hermes backup --quick` keeps 20
+  copies, so the plan to run it before every tar was a disk bomb. Replaced
+  with Mechanic's own SQLite online backup of the declared databases
+  (`sqlite_globs`), gzipped into `<snapshot>/sqlite/`, live db and
+  sidecars excluded from the tar, `state-snapshots/` excluded, restore
+  puts the copies back. Tested with a WAL database held open by a writer.
+  `mechanic plan --target hermes` on the real Mac: healthy, "already
+  ahead of v2026.9.24, waits for a newer tag", nothing to install; no
+  newer tag exists upstream as of 2026-10-04. The operator's gateway
+  watchdog (every 5 min, hourly cooldown, kickstart only when the process
+  is gone or a platform connection has failed for 15 min) coexists with
+  Mechanic's drain-first restart; HERMES_GATEWAY_AUTOHEAL stays off.
 
 ### Current state
 Code complete, unit-tested, and simulated. NOT run against a live Hermes

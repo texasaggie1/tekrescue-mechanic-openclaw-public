@@ -29,7 +29,17 @@ Disk layout (CLAUDE.md section 5), shown for OpenClaw:
 they're high-churn caches with no recovery value, and they're the source of
 the live-daemon race that broke v0.1's first install attempt. Hermes's
 excludes mirror its own `hermes backup` list (the code checkout, package
-manager stores, caches, prior backups, browser profiles).
+manager stores, caches, prior backups, browser profiles, and its own
+state-snapshots, each of which holds a full copy of state.db).
+
+SQLite databases get special treatment where a store declares them
+(`sqlite_globs`): a raw tar of a live WAL-mode database can be
+inconsistent, so capture copies each one with SQLite's online backup API
+(Python's sqlite3 module, no external tool) into `<snapshot>/sqlite/`,
+gzip-compressed, and leaves the live `.db`, `-wal`, `-shm` files out of
+the tar. Restore untars, then puts the copies back and drops stale
+sidecars. On the maintainer's Mac mini state.db is 638 MB; this is the
+difference between a snapshot and a disk full.
 
 Restore is operator-driven (via `mechanic restore`). It stops the target's
 daemon, untars over the data dir, and restarts the daemon. The nightly
@@ -39,9 +49,11 @@ the operator decides whether to roll back.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import shutil
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -79,12 +91,16 @@ DEFAULT_EXCLUDES = ("tmp", "logs")
 # one.
 HERMES_EXCLUDES = (
     "hermes-agent", "installs", "tools", "cache", ".cache", "backups", "logs",
-    "browser_profiles", "browser-profiles", "browser-profile", "checkpoints",
-    "node_modules", ".venv", "venv",
+    "state-snapshots", "browser_profiles", "browser-profiles", "browser-profile",
+    "checkpoints", "node_modules", ".venv", "venv",
 )
 # Patterns excluded at any depth (bsdtar and GNU tar both match these
 # against the path tail).
 HERMES_EXCLUDE_PATTERNS = ("*/__pycache__", "*/node_modules", "*/.venv")
+# SQLite databases captured with the online backup API instead of tar.
+HERMES_SQLITE_GLOBS = ("*.db", "cron/*.db")
+SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+SQLITE_DIRNAME = "sqlite"
 
 _TAR_TIMEOUT_SECONDS = 600
 
@@ -113,6 +129,10 @@ class SnapshotStore:
     source: Path
     excludes: tuple[str, ...] = ()
     exclude_patterns: tuple[str, ...] = ()
+    #: Globs (relative to `source`) of SQLite databases to copy with the
+    #: online backup API rather than tar. Their live files and sidecars are
+    #: excluded from the archive.
+    sqlite_globs: tuple[str, ...] = ()
 
     @property
     def nightly_dir(self) -> Path:
@@ -147,6 +167,7 @@ def hermes_store(config: Config) -> SnapshotStore:
         source=config.hermes.home,
         excludes=HERMES_EXCLUDES,
         exclude_patterns=HERMES_EXCLUDE_PATTERNS,
+        sqlite_globs=HERMES_SQLITE_GLOBS,
     )
 
 
@@ -355,9 +376,11 @@ def capture_snapshot(
     archive_tmp = tmp_dir / ARCHIVE_FILENAME
 
     try:
+        databases = _snapshot_sqlite(store, tmp_dir / SQLITE_DIRNAME)
         _run_tar_create(
             source, archive_tmp,
-            excludes=store.excludes, exclude_patterns=store.exclude_patterns,
+            excludes=store.excludes,
+            exclude_patterns=store.exclude_patterns + _sqlite_tar_excludes(store, databases),
         )
         metadata = {
             "snapshot_id": sid,
@@ -373,7 +396,9 @@ def capture_snapshot(
             "archive_filename": ARCHIVE_FILENAME,
             "excludes": list(store.excludes),
             "exclude_patterns": list(store.exclude_patterns),
-            "archive_size_bytes": archive_tmp.stat().st_size,
+            "sqlite_databases": databases,
+            "archive_size_bytes": archive_tmp.stat().st_size
+            + sum((tmp_dir / SQLITE_DIRNAME / f"{d}.gz").stat().st_size for d in databases),
             "extra": dict(extra or {}),
         }
         (tmp_dir / METADATA_FILENAME).write_text(
@@ -430,6 +455,7 @@ def restore_snapshot(store: SnapshotStore, snapshot: Snapshot) -> None:
         _run_tar_extract(snapshot.archive_path, into=target.parent, strip_to=target.name)
         if backup is not None:
             _carry_over_excluded(backup, target, store.excludes)
+        _restore_sqlite(snapshot, target)
     except Exception:
         if backup is not None and not _has_meaningful_content(target):
             if target.exists():
@@ -604,6 +630,100 @@ def _run_tar_extract(archive: Path, *, into: Path, strip_to: str) -> None:
             f"tar extract completed but {final} does not exist. "
             f"Archive may have been written with the wrong top-level name."
         )
+
+
+def _sqlite_files(store: SnapshotStore) -> list[Path]:
+    """The live SQLite databases a store wants copied safely, relative paths."""
+    found: list[Path] = []
+    for pattern in store.sqlite_globs:
+        for path in sorted(store.source.glob(pattern)):
+            if path.is_file():
+                found.append(path.relative_to(store.source))
+    return found
+
+
+def _sqlite_tar_excludes(store: SnapshotStore, captured: list[str]) -> tuple[str, ...]:
+    """tar patterns that keep the safely copied databases and sidecars out.
+
+    Only databases that WERE copied are excluded; a `.db` file SQLite could
+    not open as a database (some other format wearing the suffix) stays in
+    the tar like any other file.
+    """
+    patterns: list[str] = []
+    basename = store.source.name
+    for rel in captured:
+        patterns.append(f"{basename}/{rel}")
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            patterns.append(f"{basename}/{rel}{suffix}")
+    return tuple(patterns)
+
+
+def _snapshot_sqlite(store: SnapshotStore, destination: Path) -> list[str]:
+    """Copy each declared database with SQLite's online backup API, gzipped.
+
+    The backup API reads a consistent image even while the owning daemon
+    writes (it retries page batches on SQLITE_BUSY), which a tar of the
+    main file plus a separate WAL file does not guarantee. Returns the
+    relative paths captured. A database that cannot be read fails the
+    snapshot: a rollback point without the state database is not one.
+    """
+    captured: list[str] = []
+    for rel in _sqlite_files(store):
+        live = store.source / rel
+        out = destination / f"{rel}.gz"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp_copy = out.with_suffix(".tmp")
+        started = time.monotonic()
+        try:
+            src = sqlite3.connect(f"file:{live}?mode=ro", uri=True, timeout=30)
+            try:
+                dst = sqlite3.connect(str(tmp_copy))
+                try:
+                    src.backup(dst, pages=4096, sleep=0.05)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            with open(tmp_copy, "rb") as raw, gzip.open(out, "wb", compresslevel=6) as packed:
+                shutil.copyfileobj(raw, packed, length=1024 * 1024)
+        except sqlite3.DatabaseError as exc:
+            if "not a database" in str(exc).lower():
+                _LOG.warning(
+                    "snapshot: %s is not a SQLite database (%s); archiving it as a plain file",
+                    rel, exc,
+                )
+                out.unlink(missing_ok=True)
+                continue
+            raise RollbackError(f"could not snapshot SQLite database {rel}: {exc}") from exc
+        except (sqlite3.Error, OSError) as exc:
+            raise RollbackError(f"could not snapshot SQLite database {rel}: {exc}") from exc
+        finally:
+            tmp_copy.unlink(missing_ok=True)
+        _LOG.info(
+            "snapshot: sqlite backup of %s in %d ms (%d bytes gzipped)",
+            rel, int((time.monotonic() - started) * 1000), out.stat().st_size,
+        )
+        captured.append(str(rel))
+    return captured
+
+
+def _restore_sqlite(snapshot: Snapshot, target: Path) -> None:
+    """Put the snapshot's database copies back and drop stale sidecars."""
+    sqlite_dir = snapshot.path / SQLITE_DIRNAME
+    if not sqlite_dir.is_dir():
+        return
+    for packed in sorted(sqlite_dir.rglob("*.gz")):
+        rel = packed.relative_to(sqlite_dir).with_suffix("")
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with gzip.open(packed, "rb") as raw, open(dest, "wb") as out:
+                shutil.copyfileobj(raw, out, length=1024 * 1024)
+        except OSError as exc:
+            raise RollbackError(f"could not restore SQLite database {rel}: {exc}") from exc
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            Path(f"{dest}{suffix}").unlink(missing_ok=True)
+        _LOG.info("restore: SQLite database %s put back", rel)
 
 
 def _carry_over_excluded(backup: Path, target: Path, excludes: tuple[str, ...]) -> None:

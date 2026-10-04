@@ -10,8 +10,9 @@ Runs once per target in TARGETS order (see targets.py). For each target:
   2. Pre-update verify. If the target is already broken, skip the update
      and run doctor anyway in case it can fix the existing breakage.
   3. Capture a nightly snapshot as a tar.gz archive (see rollback.py).
-     Hermes first runs `hermes backup --quick` so a SQLite-safe copy of its
-     state lands inside the archive. `--no-snapshot` (manual runs only)
+     Hermes's SQLite databases are copied with the online backup API and
+     stored inside the snapshot, consistent under the live gateway.
+     `--no-snapshot` (manual runs only)
      skips this and the last-known-good refresh: the two tars are most of
      a run's wall-clock, and a developer iterating on doctor or verify does
      not need a rollback point every time. The report says so in capitals.

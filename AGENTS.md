@@ -207,6 +207,20 @@ and `hermes_tags.json`, the tag ledger).
   scan, and treats a tag whose commit changed as hostile. Upstream tags
   are mirrored into `refs/mechanic/upstream-tags/` so Hermes's own
   `refs/tags/` is never written by Mechanic.
+- **Hermes's state.db is big and its quick snapshots multiply it.** On the
+  maintainer's Mac mini state.db is 638 MB (10,865 sessions). `hermes
+  backup --quick` writes a full copy of it under `~/.hermes/state-snapshots/`
+  and keeps the last 20, so running it nightly would park 12.7 GB there
+  within three weeks and Mechanic's tar would sweep every copy into every
+  archive. Mechanic therefore does not call it. `rollback._snapshot_sqlite`
+  copies each declared database with SQLite's online backup API (stdlib
+  sqlite3, consistent under a live writer) into `<snapshot>/sqlite/`,
+  gzipped, and the live `.db`, `-wal`, `-shm` files and `state-snapshots/`
+  stay out of the tar; restore puts the copies back. OpenClaw's config dir
+  is still tarred live, as it has been since v0.1.1; its SQLite session
+  store has not caused a bad restore yet, and changing a production-proven
+  path without a reason is not the Mechanic way. Candidate for the same
+  treatment when there is evidence.
 - **A restore must not delete what the archive excludes.** Hermes's
   archive leaves out the code checkout and the package manager's stores
   (gigabytes, all regenerable, all essential); `restore_snapshot` moves

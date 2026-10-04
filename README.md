@@ -335,15 +335,18 @@ So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
    `hermes update`, or the checkout sits on `main`'s tip) means "wait for
    a newer tag to age"; Mechanic never downgrades. Anything else means
    "diverged, leaving it alone".
-5. Runs `hermes backup --quick`, takes its own archive of `~/.hermes`
-   (minus the checkout, the package manager's stores, caches, and browser
-   profiles, the same list `hermes backup` skips), then `git checkout
-   --detach <tag>`, `hermes pm install` (Hermes's documented repair
-   command, the same code its updater runs), `hermes doctor --fix`,
-   and a gateway restart through launchd if one was running and you have
-   not disabled it. Verify checks `hermes --version`, that the checkout
-   landed on the expected commit, `hermes pm status`, and `hermes gateway
-   status`.
+5. Takes its own archive of `~/.hermes` (minus the checkout, the package
+   manager's stores, caches, browser profiles, and Hermes's own
+   state-snapshots, the same list `hermes backup` skips). The SQLite
+   databases (`state.db`, `cron/*.db`, and friends) are copied with
+   SQLite's online backup API and stored gzipped inside the snapshot, so
+   the archive carries a consistent database rather than a racy copy of
+   a live WAL file. Then `git checkout --detach <tag>`, `hermes pm
+   install` (Hermes's documented repair command, the same code its
+   updater runs), `hermes doctor --fix`, and a gateway restart through
+   launchd if one was running and you have not disabled it. Verify checks
+   `hermes --version`, that the checkout landed on the expected commit,
+   `hermes pm status`, and `hermes gateway status`.
 
 If `hermes pm install` fails, the checkout goes back to the commit it
 was on and the environment is rebuilt for that, so a bad night never

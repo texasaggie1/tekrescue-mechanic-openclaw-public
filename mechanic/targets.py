@@ -353,9 +353,6 @@ class HermesTarget(Target):
             error=plan.error, notes=notes, plan=plan,
         )
 
-    def pre_snapshot(self) -> Optional[str]:
-        return hermes_release.quick_backup(self.settings)
-
     def snapshot_extra(self) -> dict:
         head = hermes_release.head_commit(self.settings)
         return {

@@ -74,6 +74,55 @@ class RollbackTests(unittest.TestCase):
         self.assertTrue(lkg.path.exists())
 
 
+class SqliteSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import sqlite3
+
+        self.tmp = Path(tempfile.mkdtemp(prefix="mechanic-sqlite-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.source = self.tmp / "hermes-home"
+        (self.source / "cron").mkdir(parents=True)
+        (self.source / "config.yaml").write_text("v1\n")
+        for rel in ("state.db", "cron/executions.db"):
+            conn = sqlite3.connect(self.source / rel)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t (v TEXT)")
+            conn.execute("INSERT INTO t VALUES ('before')")
+            conn.commit()
+            # Keep a writer open so a WAL and shm file exist, as on a live host.
+            self.addCleanup(conn.close)
+            setattr(self, rel.replace("/", "_").replace(".", "_"), conn)
+        self.store = SnapshotStore(
+            name="hermes", root=self.tmp / "snapshots" / "hermes", source=self.source,
+            excludes=("state-snapshots",), sqlite_globs=("*.db", "cron/*.db"),
+        )
+
+    def test_databases_are_copied_safely_and_kept_out_of_the_tar(self) -> None:
+        import sqlite3
+
+        snap = capture_snapshot(self.store, kind=KIND_NIGHTLY, version="v1")
+        listing = _tar_list(snap.archive_path)
+        self.assertIn("hermes-home/config.yaml", listing)
+        self.assertFalse(any(name.endswith((".db", ".db-wal", ".db-shm")) for name in listing), listing)
+        self.assertTrue((snap.path / "sqlite" / "state.db.gz").is_file())
+        self.assertTrue((snap.path / "sqlite" / "cron" / "executions.db.gz").is_file())
+
+        # Change the live databases, then restore: rows come back, sidecars go.
+        self.state_db.execute("UPDATE t SET v='after'")
+        self.state_db.commit()
+        self.state_db.close()
+        self.cron_executions_db.close()
+        restore_snapshot(self.store, snap)
+        conn = sqlite3.connect(self.source / "state.db")
+        self.assertEqual(conn.execute("SELECT v FROM t").fetchone()[0], "before")
+        conn.close()
+        self.assertFalse((self.source / "state.db-wal").exists())
+        self.assertFalse((self.source / "state.db-shm").exists())
+        conn = sqlite3.connect(self.source / "cron" / "executions.db")
+        self.assertEqual(conn.execute("SELECT v FROM t").fetchone()[0], "before")
+        conn.close()
+
+
 def _tar_list(archive: Path) -> set[str]:
     import tarfile
 
