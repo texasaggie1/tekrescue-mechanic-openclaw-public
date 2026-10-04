@@ -40,6 +40,87 @@ Be honest about half-finished work.
 
 ## 2026-10-04 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.0, Hermes Agent as a second target
 
+### Resume here (checkpoint written mid-deployment, 2026-10-04 ~18:00 UTC)
+This is a supervised deployment in progress on the operator's Mac mini.
+If you are a fresh session, read this block before anything else; the
+operator pastes terminal output and expects the next command block. Every
+command block given to the operator must start with `cd` to an absolute
+path (their standing instruction).
+
+Where the code is:
+- Public repo, this branch, HEAD `0a848fd` (v0.2.0 plus the round 4
+  fixes). `main` is at `f5b9cac` (v0.1.4). Not merged.
+- The maintainer's private line is at its v0.1.5; it has NOT adopted
+  v0.2.0. Its public checkout lives in a `public/` subfolder of the
+  private clone on the Mac; the maintainer owns the adoption commit.
+- 84 unit tests pass (`python -m unittest discover -s tests`); the
+  simulated nightlies for both targets pass with a domain-faithful fake
+  launchctl.
+
+The Mac mini (user `openclaw`, uid 502):
+- Private clone `/Users/openclaw/Projects/tekrescue-mechanic-openclaw`,
+  venv `.venv` there; `mechanic` in that venv is an editable install of
+  `public/` (the public checkout inside it), reporting 0.2.0. Mechanic's
+  own LaunchAgents `com.tekrescue.mechanic.supervisor` (every 240 min)
+  and `com.tekrescue.mechanic.updater` (02:00 local) are loaded and run
+  that venv, so they execute whatever `public/` is checked out at.
+- `.env` at `~/.config/tekrescue-mechanic/.env`: TARGETS includes
+  hermes (confirm with `grep TARGETS`), Telegram notifier, UPDATE_TIME
+  02:00, SUPERVISOR_INTERVAL_MINUTES 240, SNAPSHOT_RETENTION_DAYS 30,
+  OPENCLAW_BIN_PATH /opt/homebrew/bin/openclaw, HERMES_GATEWAY_AUTOHEAL
+  off (default).
+- Hermes: source install, launcher `/Users/openclaw/.local/bin/hermes`,
+  checkout `~/.hermes/hermes-agent` on 98d8ea7 (release 2026.9.24, the
+  newest upstream tag as of today, so nothing to install until a newer
+  tag ages 7 days). `hermes --version` prints
+  `Hermes Agent v0.21.5+6547.g98d8ea7 (2026.9.24)`. state.db is 638 MB.
+  Gateway `ai.hermes.gateway` pid 37096, alive, in launchd domain
+  `user/502` (NOT gui/502). Operator agents beside it:
+  `com.texasaggie1.hermes-gateway-watchdog` (keep; it is why autoheal
+  stays off) and `com.texasaggie1.michael-hermes-backup` (last exit 1,
+  not ours, mention only).
+- OpenClaw: `ai.openclaw.gateway` still running and enabled in gui/502.
+  The operator wants it OFF; that is the last step below.
+- Mechanic state on the Mac after the one real run: Hermes
+  `supervisor_state.hermes.json` has consecutive_failures=1 (false
+  failure, see round 4), no last-known-good, no first-known-good, one
+  813 MB nightly snapshot `2026-10-04T17-21-32Z` under
+  `~/Library/Application Support/tekrescue-mechanic/snapshots/hermes/`.
+  Until the operator pulls `0a848fd` into `public/`, every 02:00 nightly
+  repeats the false failure (another ~800 MB each) and the target
+  auto-pauses at MAX_CONSECUTIVE_FAILURES=3. Pull first.
+
+Exact next steps, in order (round 5 onward):
+1. `cd /Users/openclaw/Projects/tekrescue-mechanic-openclaw/public &&
+   git pull --ff-only origin claude/open-claw-version-delay-gr91ha`;
+   expect `0a848fd`.
+2. `cd /Users/openclaw && /Users/openclaw/Projects/tekrescue-mechanic-openclaw/.venv/bin/mechanic run-now --target hermes`.
+   Expect STATUS: SUCCESS, `Verify: ... Gateway running (pid 37096).`, a
+   one-line `Doctor:` (`hermes doctor --fix exit 1: fixed N, M finding(s)
+   need the operator ...` is normal; the 5 findings are Hermes advice to
+   its operator), a `Last known good:` line, a tar well under 649 MB,
+   and the report delivered to Telegram. consecutive_failures resets.
+3. `mechanic capture-first-good --target hermes`, then one
+   `mechanic-supervisor` run (`echo "exit $?"`), expect exit 0 and a
+   heartbeat on Telegram naming the gateway pid.
+4. Merge this branch to main (fast-forward), SESSIONS.md updated in the
+   same commit, scrub check before push (zero hits for IPs, the agent
+   names, hostnames, personal emails).
+5. Take the OpenClaw agent offline, disable before bootout, in the
+   domain it lives in: `launchctl print gui/502/ai.openclaw.gateway`
+   (fall back to user/502), then `launchctl disable <domain>/ai.openclaw.gateway
+   && launchctl bootout <domain>/ai.openclaw.gateway`; verify with
+   `launchctl list | grep -i -E 'openclaw|mechanic'` and `pgrep -fl
+   openclaw` (nothing OpenClaw-related). Disable only, never delete the
+   plist. If TARGETS still lists openclaw, `mechanic status` must then
+   show it DISABLED by operator and the heartbeat must say so, not
+   restart it. Dropping openclaw from TARGETS is the belt-and-braces.
+6. Maintainer follow-ups (theirs, not ours): adopt v0.2.0 into the
+   private line; the private repo's instruction that Hermes must never
+   be touched is superseded by the operator's explicit request today and
+   should be rewritten there; `scripts/deps/relock.sh` for the
+   idna/urllib3 bumps.
+
 ### What we did
 - Mechanic is multi-target. `TARGETS=openclaw|hermes|openclaw,hermes`
   (default openclaw, so a v0.1 .env keeps working). `targets.py` holds the
