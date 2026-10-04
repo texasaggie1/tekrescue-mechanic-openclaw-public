@@ -40,7 +40,7 @@ Be honest about half-finished work.
 
 ## 2026-10-04 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.0, Hermes Agent as a second target
 
-### Resume here (checkpoint written mid-deployment, 2026-10-04 ~18:00 UTC)
+### Resume here (checkpoint rewritten 2026-10-04 ~18:45 UTC, after round 5)
 This is a supervised deployment in progress on the operator's Mac mini.
 If you are a fresh session, read this block before anything else; the
 operator pastes terminal output and expects the next command block. Every
@@ -81,25 +81,22 @@ The Mac mini (user `openclaw`, uid 502):
   not ours, mention only).
 - OpenClaw: `ai.openclaw.gateway` still running and enabled in gui/502.
   The operator wants it OFF; that is the last step below.
-- Mechanic state on the Mac after the one real run: Hermes
-  `supervisor_state.hermes.json` has consecutive_failures=1 (false
-  failure, see round 4), no last-known-good, no first-known-good, one
-  813 MB nightly snapshot `2026-10-04T17-21-32Z` under
-  `~/Library/Application Support/tekrescue-mechanic/snapshots/hermes/`.
-  Until the operator pulls `0a848fd` into `public/`, every 02:00 nightly
-  repeats the false failure (another ~800 MB each) and the target
-  auto-pauses at MAX_CONSECUTIVE_FAILURES=3. Pull first.
+- Mechanic state on the Mac after round 5 (`public/` at `5507be7`,
+  `mechanic run-now --target hermes` at 13:34 local, 2026-10-04): STATUS
+  SUCCESS, gateway found at pid 37096 in user/502, Doctor line one line
+  ("exit 1: 5 finding(s) need the operator", Hermes advice, not ours),
+  last_success stamped, consecutive_failures reset to 0, last-known-good
+  captured (`2026-10-04T18-35-03Z`), no first-known-good yet. Snapshot
+  now 386 MB (tar 201 MB in 10 s plus state.db 204 MB gzipped) against
+  813 MB in round 4. No notifier warning in the log (Telegram delivery
+  to be confirmed by the operator). The round 4 nightly
+  `2026-10-04T17-21-32Z` (813 MB) is still on disk; retention prunes it
+  in 30 days, or the operator may delete that one directory now.
 
-Exact next steps, in order (round 5 onward):
-1. `cd /Users/openclaw/Projects/tekrescue-mechanic-openclaw/public &&
-   git pull --ff-only origin claude/open-claw-version-delay-gr91ha`;
-   expect `0a848fd`.
-2. `cd /Users/openclaw && /Users/openclaw/Projects/tekrescue-mechanic-openclaw/.venv/bin/mechanic run-now --target hermes`.
-   Expect STATUS: SUCCESS, `Verify: ... Gateway running (pid 37096).`, a
-   one-line `Doctor:` (`hermes doctor --fix exit 1: fixed N, M finding(s)
-   need the operator ...` is normal; the 5 findings are Hermes advice to
-   its operator), a `Last known good:` line, a tar well under 649 MB,
-   and the report delivered to Telegram. consecutive_failures resets.
+Exact next steps, in order (round 6 onward; rounds 1 to 5 done):
+1. DONE (round 5): pull to `5507be7`, real nightly SUCCESS as recorded
+   above.
+2. DONE (round 5).
 3. `mechanic capture-first-good --target hermes`, then one
    `mechanic-supervisor` run (`echo "exit $?"`), expect exit 0 and a
    heartbeat on Telegram naming the gateway pid.
