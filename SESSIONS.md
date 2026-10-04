@@ -102,7 +102,16 @@ Exact next steps, in order (steps 1 to 4 done):
 2. DONE (round 5).
 3. DONE (13:41 local): first-known-good, supervisor exit 0, status clean.
 4. DONE: merged to main (fast-forward), this entry.
-5. BEFORE taking the OpenClaw agent offline, check who starts Ollama.
+5. VERDICT (2026-10-04 ~19:45 UTC): Ollama is independent of OpenClaw.
+   `ollama serve` (pid 11512, listening on *:11434) is a child of the
+   Ollama menu bar app (`/Applications/Ollama.app/Contents/MacOS/Ollama`,
+   pid 11506), which LaunchServices started as a login item; launchd
+   lists `com.ollama.ollama` registered in the user's domain and no
+   Ollama plist exists in any LaunchAgents directory (the app's own
+   login-item registration, not a plist). No Homebrew service. The
+   OpenClaw bootout cannot take it down. Original note kept below for
+   the record.
+   BEFORE taking the OpenClaw agent offline, check who starts Ollama.
    Operator note (2026-10-04, from their Hermes session): Ollama must
    keep running on port 11434 after OpenClaw goes down; the operator's
    local Honcho memory server uses it for embeddings (nomic-embed-text).
