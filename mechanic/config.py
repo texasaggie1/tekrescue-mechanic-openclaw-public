@@ -50,6 +50,8 @@ _MECHANIC_ENV_VARS = (
     "OPENCLAW_CONFIG_PATH",
     "OPENCLAW_MIN_UPDATE_AGE_DAYS",
     "OPENCLAW_SKIP_VERSIONS",
+    "OPENCLAW_GATEWAY_AUTOHEAL",
+    "HERMES_GATEWAY_AUTOHEAL",
     "HERMES_BIN_PATH",
     "HERMES_HOME",
     "HERMES_SOURCE_DIR",
@@ -131,6 +133,9 @@ class OpenClawSettings:
     config_path: Path
     min_update_age_days: int
     skip_versions: tuple[str, ...] = ()
+    #: Restart the gateway when it is found dead (v0.1.4 self-heal). Never
+    #: applies to a service the operator has launchctl-disabled.
+    gateway_autoheal: bool = True
 
 
 @dataclass(frozen=True)
@@ -153,6 +158,9 @@ class HermesSettings:
     skip_tags: tuple[str, ...] = ()
     doctor_fix: bool = True
     gateway_restart_timeout_seconds: int = 2400
+    #: Off by default: Hermes operators often run their own gateway
+    #: watchdog, and two healers fighting over one service helps nobody.
+    gateway_autoheal: bool = False
 
 
 @dataclass(frozen=True)
@@ -322,6 +330,7 @@ def _load_openclaw(path: Path, *, default_min_age: int) -> OpenClawSettings:
             "OPENCLAW_MIN_UPDATE_AGE_DAYS", default=default_min_age, min_value=0
         ),
         skip_versions=_env_list("OPENCLAW_SKIP_VERSIONS"),
+        gateway_autoheal=_env_bool("OPENCLAW_GATEWAY_AUTOHEAL", default=True),
     )
 
 
@@ -352,6 +361,7 @@ def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
         gateway_restart_timeout_seconds=_env_int(
             "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS", default=2400, min_value=60
         ),
+        gateway_autoheal=_env_bool("HERMES_GATEWAY_AUTOHEAL", default=False),
     )
 
 

@@ -7,15 +7,20 @@ stopped (otherwise the daemon recreates files in the data dir during the
 untar, leaving a corrupted state).
 
 This module wraps `launchctl unload/load` with a wait-until-down poll so the
-restore flow knows when it is safe to mutate the data dir, and it reads
+restore flow knows when it is safe to mutate the data dir, reads
+`launchctl print` for the one fact `launchctl list` cannot give (whether a
+PID is actually alive), self-heals a gateway that died (v0.1.4), and reads
 `launchctl print-disabled` so Mechanic can tell when the OPERATOR has
 switched a gateway off on purpose.
 
-That last part is a scar (SESSIONS.md 2026-10-04): a `launchctl bootout` of
-the OpenClaw gateway lasted exactly one supervisor tick. The next read-only
-probe (`openclaw --version`, `openclaw update status --json`) had OpenClaw
-bring its own gateway back. Mechanic now treats "disabled by the operator"
-as "do not run this product's CLI at all".
+Two scars live here. v0.1.4 (2026-09): `openclaw --version` answers happily
+with a dead gateway, so four outages were reported "healthy" for their
+whole duration, one for 43 hours; `check_gateway` is the liveness check
+and the restart. v0.2.0 (2026-10-04): that very self-heal brought back a
+gateway the operator had just booted out, four hours later, on the next
+heartbeat. Mechanic had no way to know the operator meant it. Now it does:
+a service the operator has `launchctl disable`d is never healed, never
+started, and its product's CLI is never run.
 
 Labels and plist paths are user-level (not root) and follow each product's
 standard install; the plist directory is `~/Library/LaunchAgents`.
@@ -74,6 +79,199 @@ def is_loaded(label: str = OPENCLAW_DAEMON_LABEL) -> bool:
     except (subprocess.SubprocessError, OSError):
         return False
     return result.returncode == 0
+
+
+def gui_domain() -> str:
+    """launchd per-user domain for the current uid, e.g. 'gui/502'."""
+    return f"gui/{os.getuid()}"
+
+
+def service_target(label: str) -> str:
+    """Fully-qualified launchd service target, e.g. 'gui/502/ai.openclaw.gateway'."""
+    return f"{gui_domain()}/{label}"
+
+
+def running_pid(label: str) -> Optional[int]:
+    """The gateway's pid if launchd reports it RUNNING, else None.
+
+    This is the liveness check `is_loaded()` is not. `launchctl list` (and
+    `launchctl print`) succeed for a service that is merely registered;
+    only a `pid = N` line means a process is actually alive. The outages
+    Mechanic failed to catch in 2026-07 and 2026-09 all left the service
+    enabled-but-not-running, which `is_loaded()` and a `--version` probe
+    both report as fine.
+    """
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", service_target(label)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"^\s*pid\s*=\s*(\d+)", result.stdout, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def is_running(label: str) -> bool:
+    """True when launchd reports a live pid for `label`."""
+    return running_pid(label) is not None
+
+
+def ensure_running(
+    *,
+    label: str,
+    plist_path: Optional[Path] = None,
+    wait_timeout_seconds: int = 60,
+) -> tuple[bool, Optional[int]]:
+    """Make sure the gateway is running; restart it if it is not.
+
+    Returns `(restarted, pid)`. `restarted` is False when it was already up.
+
+    Uses the per-domain API (`bootstrap` + `kickstart -k`) rather than the
+    legacy `load`/`unload` used by stop()/start(). The failure mode we
+    actually hit is "enabled but never bootstrapped", where `launchctl
+    load` is unreliable and `kickstart -k` is the command verified to
+    recover the host every time.
+
+    Refuses, with DaemonControlError, when the operator has disabled the
+    service: a deliberate shutdown is not an outage.
+    """
+    plist_path = plist_path or plist_path_for(label)
+    pid = running_pid(label)
+    if pid is not None:
+        return False, pid
+
+    if is_disabled(label):
+        raise DaemonControlError(
+            f"{label} is disabled by the operator (launchctl disable); not restarting it."
+        )
+    if not plist_path.exists():
+        raise DaemonControlError(
+            f"Cannot start {label}: plist {plist_path} does not exist."
+        )
+
+    target = service_target(label)
+    _LOG.warning("daemon: %s is not running; restarting via %s", label, target)
+
+    # Best effort: no-ops (non-zero) when already bootstrapped, which is fine.
+    try:
+        subprocess.run(
+            ["launchctl", "bootstrap", gui_domain(), str(plist_path)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _LOG.info("daemon: bootstrap of %s failed (continuing): %s", target, exc)
+
+    try:
+        result = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise DaemonControlError(f"launchctl kickstart {target} failed: {exc}") from exc
+    if result.returncode != 0:
+        raise DaemonControlError(
+            f"launchctl kickstart {target} exit {result.returncode}: "
+            f"{result.stderr.strip()}"
+        )
+
+    deadline = time.monotonic() + wait_timeout_seconds
+    while time.monotonic() < deadline:
+        pid = running_pid(label)
+        if pid is not None:
+            _LOG.info("daemon: %s confirmed running (pid %s)", label, pid)
+            return True, pid
+        time.sleep(1.0)
+
+    raise DaemonControlError(
+        f"{label} did not report a running pid within {wait_timeout_seconds}s "
+        f"of kickstart."
+    )
+
+
+class GatewayCheck:
+    """Outcome of a gateway liveness check and any repair that followed."""
+
+    __slots__ = ("label", "pid", "installed", "was_down", "healed", "error")
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        pid: Optional[int],
+        installed: bool = True,
+        was_down: bool = False,
+        healed: bool = False,
+        error: Optional[str] = None,
+    ) -> None:
+        self.label = label
+        self.pid = pid
+        self.installed = installed
+        self.was_down = was_down
+        self.healed = healed
+        self.error = error
+
+    @property
+    def ok(self) -> bool:
+        """True when the gateway is running now, or there is none to run."""
+        return self.pid is not None or not self.installed
+
+    def summary(self) -> str:
+        if not self.installed:
+            return "No gateway service installed."
+        if self.was_down and self.healed:
+            return f"Gateway was DOWN; Mechanic restarted it (now pid {self.pid})."
+        if self.was_down:
+            return f"Gateway is DOWN and was not restarted: {self.error}"
+        return f"Gateway running (pid {self.pid})."
+
+
+def check_gateway(label: str, *, autoheal: bool = True) -> GatewayCheck:
+    """Confirm the gateway process is alive, restarting it if allowed.
+
+    This is the check a `--version` probe cannot make. Never raises: a
+    failed or refused repair comes back as `ok == False` with `error` set,
+    so an unattended caller can report it instead of crashing. No plist
+    means no gateway is installed (a CLI-only install) and that is fine.
+    """
+    plist = plist_path_for(label)
+    pid = running_pid(label)
+    if pid is not None:
+        return GatewayCheck(label=label, pid=pid)
+    if not plist.exists():
+        return GatewayCheck(label=label, pid=None, installed=False)
+
+    _LOG.warning("gateway %s is not running", label)
+    if is_disabled(label):
+        return GatewayCheck(
+            label=label, pid=None, was_down=True,
+            error="disabled by the operator (launchctl disable); left alone",
+        )
+    if not autoheal:
+        return GatewayCheck(label=label, pid=None, was_down=True, error="autoheal is off")
+
+    try:
+        _, new_pid = ensure_running(label=label, plist_path=plist)
+    except DaemonControlError as exc:
+        _LOG.error("gateway restart failed: %s", exc)
+        return GatewayCheck(label=label, pid=None, was_down=True, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - unattended callers must never die here
+        _LOG.error("gateway restart raised: %s", exc)
+        return GatewayCheck(label=label, pid=None, was_down=True, error=str(exc))
+
+    _LOG.warning("gateway %s restarted by Mechanic (pid %s)", label, new_pid)
+    return GatewayCheck(label=label, pid=new_pid, was_down=True, healed=True)
 
 
 def is_disabled(label: str) -> Optional[bool]:

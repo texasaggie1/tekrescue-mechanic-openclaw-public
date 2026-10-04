@@ -44,6 +44,27 @@ KNOWN_PROMPTS_FILE = RUNTIME_STATE_DIR / "known_prompts.json"
 DEFAULT_RUN_TIMEOUT_SECONDS = 600
 DEFAULT_PROMPT_TIMEOUT_SECONDS = 60
 
+# Tell OpenClaw that something else (launchd) owns the gateway service, so
+# doctor performs config repair only and never stops/starts/reinstalls the
+# service itself. Supported by OpenClaw since 2026.4.25-beta.1.
+#
+# Why this is not optional (four outages in 2026-07 and 2026-09): `openclaw
+# doctor --fix` stops the gateway to enter maintenance, then tries to
+# restart it. On a host running EDR the restart aborts, because before
+# mutating its LaunchAgent OpenClaw scans every /Library/LaunchDaemons/*.plist
+# to prove no system daemon owns its label, and fails closed on any plist it
+# cannot read. Elastic Defend keeps co.elastic.endpoint.plist at mode 644
+# while blocking reads at the Endpoint Security layer, so OpenClaw's
+# "unreadable, skip it" escape hatch (which tests permission bits via
+# fs.access) never fires. Doctor then exits leaving the gateway STOPPED, and
+# a `--version` probe still reports healthy because the CLI works fine with
+# a dead gateway. Three of those outages started within one second of the
+# 02:00 doctor step. With the policy set, doctor declines maintenance ("Stop
+# the Gateway through its service owner") instead of stopping it, and never
+# touches the plists, which also stops the EDR raising a case every night.
+SERVICE_REPAIR_POLICY_ENV = "OPENCLAW_SERVICE_REPAIR_POLICY"
+SERVICE_REPAIR_POLICY_EXTERNAL = "external"
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -156,7 +177,13 @@ def run_doctor(
 
     mode = config.prompt_mode
     cmd = [str(config.openclaw_bin_path), "doctor", "--fix", "--non-interactive"]
-    _LOG.info("doctor: running %s (PROMPT_MODE=%s, non-interactive)", cmd, mode)
+    _LOG.info(
+        "doctor: running %s (PROMPT_MODE=%s, non-interactive, %s=%s)",
+        cmd, mode, SERVICE_REPAIR_POLICY_ENV, SERVICE_REPAIR_POLICY_EXTERNAL,
+    )
+
+    doctor_env = clean_subprocess_env()
+    doctor_env[SERVICE_REPAIR_POLICY_ENV] = SERVICE_REPAIR_POLICY_EXTERNAL
 
     started = time.monotonic()
     try:
@@ -165,7 +192,7 @@ def run_doctor(
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            env=clean_subprocess_env(),
+            env=doctor_env,
             timeout=run_timeout_seconds,
             check=False,
         )

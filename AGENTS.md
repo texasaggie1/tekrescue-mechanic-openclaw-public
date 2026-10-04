@@ -63,7 +63,7 @@ catch yourself thinking "this would be easier as a plugin," stop.
 | `mechanic/reporter.py` | formats the morning report, one block per target |
 | `mechanic/notifier.py` | Telegram / Slack / webhook / email push |
 | `mechanic/config.py` | loads `.env`, validates settings, TARGETS and per-target blocks |
-| `mechanic/cli.py` | `mechanic status`, `plan`, `run-now`, `restore`, `resume`, etc. |
+| `mechanic/cli.py` | `mechanic status`, `plan`, `run-now`, `snapshots`, `restore`, `resume`, etc. |
 
 Also in the repo: `tests/` (stdlib `unittest`, run with
 `python3 -m unittest discover -s tests` from a venv that has
@@ -136,17 +136,47 @@ and `hermes_tags.json`, the tag ledger).
   version OpenClaw reports to age, and skips `--tag` on extended-stable
   and dev because OpenClaw refuses it there. Confirm the real key from a
   live install when you can and pin the extraction.
-- **A read-only OpenClaw probe restarts OpenClaw's gateway.** On
-  2026-10-03 the operator ran `launchctl bootout` on `ai.openclaw.gateway`
-  to take the agent offline. Four hours later, exactly one supervisor
-  interval, the gateway was back: the heartbeat's `openclaw --version`
-  and `openclaw update status --json` were enough for OpenClaw to
-  re-enable and start it. Two defences now exist and both must stay:
+- **`openclaw --version` is not a liveness check, and the self-heal that
+  fixes that needs an off switch.** Four outages in 2026-07 and 2026-09
+  (one of 43 hours) were reported "healthy" because the CLI answers
+  perfectly with a dead gateway. v0.1.4 added `daemon.check_gateway`:
+  `launchctl print` for a live pid, and `bootstrap` + `kickstart -k` to
+  restart it, run by the heartbeat and after every nightly. Then, on
+  2026-10-03, the operator ran `launchctl bootout` on `ai.openclaw.gateway`
+  to take the agent offline, and four hours later, one supervisor
+  interval, that self-heal brought it back. Mechanic was doing its job
+  with no way to know the shutdown was deliberate. Now it has two:
   `TARGETS` (an unlisted product is never constructed, never probed), and
   the `launchctl print-disabled` guard in `daemon.is_disabled`, which the
-  supervisor, the updater, `plan`, and `restore` all honour. Tell the
-  operator to `launchctl disable` before `bootout`; a bare bootout does
-  not survive the next tick.
+  supervisor, the updater, `plan`, `restore`, `ensure_running`, and
+  `check_gateway` all honour. Tell the operator to `launchctl disable`
+  before `bootout`; a bare bootout does not survive the next tick.
+  `OPENCLAW_GATEWAY_AUTOHEAL` defaults on; `HERMES_GATEWAY_AUTOHEAL`
+  defaults off because Hermes operators tend to run their own watchdog
+  and two healers fighting over one service helps nobody.
+- **`openclaw doctor --fix` must run with
+  `OPENCLAW_SERVICE_REPAIR_POLICY=external`** (doctor_runner.py, v0.1.4).
+  Without it doctor stops the gateway to enter maintenance and then
+  refuses to restart it on any host with EDR: before touching its
+  LaunchAgent, OpenClaw scans every /Library/LaunchDaemons/*.plist and
+  fails closed on one it cannot read, and Elastic Defend's plist reads
+  EPERM at the Endpoint Security layer while its mode bits say readable,
+  so OpenClaw's "unreadable, skip" branch never fires. Three of the four
+  outages above began within a second of the 02:00 doctor step. Upstream
+  issue openclaw/openclaw#139813. With the policy, doctor does config
+  repair only and never touches the service or the plists.
+- **The maintainer's private repo is the development home and this one
+  is synced from it** (product files: `mechanic/`, `install.sh`,
+  `uninstall.sh`, `.env.example`, `LICENSE`, `.gitignore`,
+  `pyproject.toml`, `README.md`, `scripts/recovery/`). That sync lapsed
+  between 2026-09-06 and 2026-10-04: private v0.1.4 (gateway self-heal,
+  doctor policy) and v0.1.5 (`--no-snapshot`) never reached here while
+  public v0.1.4 (the waiting period) and v0.2.0 (Hermes) were built here.
+  Both were ported into v0.2.0 on 2026-10-04. Until the private repo
+  adopts v0.2.0, the two disagree; a version number alone does not say
+  which features an install has, `mechanic --help` does. Before every
+  push here, grep the tree for the operator's agent names, client names,
+  IPs, and personal emails; the private repo's CLAUDE.md lists them.
 - **Hermes facts (read 2026-10-04 from the hermes-agent source).** A
   source install is a git checkout at `~/.hermes/hermes-agent` tracking
   `main`, launcher `~/.local/bin/hermes`, data in `~/.hermes`, gateway

@@ -11,7 +11,10 @@ Runs once per target in TARGETS order (see targets.py). For each target:
      and run doctor anyway in case it can fix the existing breakage.
   3. Capture a nightly snapshot as a tar.gz archive (see rollback.py).
      Hermes first runs `hermes backup --quick` so a SQLite-safe copy of its
-     state lands inside the archive.
+     state lands inside the archive. `--no-snapshot` (manual runs only)
+     skips this and the last-known-good refresh: the two tars are most of
+     a run's wall-clock, and a developer iterating on doctor or verify does
+     not need a rollback point every time. The report says so in capitals.
   4. Assess. OpenClaw: `openclaw update status --json`, then the npm
      waiting period (release_age.py). Hermes: the release-tag waiting
      period against origin's tags (hermes_release.py). Anything the
@@ -27,6 +30,13 @@ Runs once per target in TARGETS order (see targets.py). For each target:
   8. Post-update verify. **The authoritative health signal.** Hermes also
      checks the checkout landed on the expected commit, `hermes pm status`,
      and `hermes gateway status` after a restart.
+  8b. Gateway liveness (v0.1.4). A `--version` probe answers happily with a
+     dead gateway; that is how a 2026-09 morning report said SUCCESS while
+     the gateway had been down for two minutes and stayed down for 43
+     hours. Anything in this routine can stop a gateway, so confirm it has
+     a live pid afterwards and, where autoheal is on, restart it. The
+     Verify line carries the result. A gateway the operator has disabled
+     is never restarted.
   9. On verify failure: log + notify, increment consecutive_failures,
      auto-pause at MAX_CONSECUTIVE_FAILURES. **NO auto-rollback.** The
      morning report tells the operator: `mechanic restore --target <t> <id>`.
@@ -58,6 +68,7 @@ from .rollback import (
     KIND_LAST_KNOWN_GOOD,
     KIND_NIGHTLY,
     RollbackError,
+    Snapshot,
     capture_snapshot,
     ensure_disk_headroom,
     prune_nightlies,
@@ -80,7 +91,11 @@ UPDATE_TIMEOUT_SECONDS = 600
 
 
 def run_updater(
-    config: Config, *, test_fire: bool = False, only: Optional[str] = None
+    config: Config,
+    *,
+    test_fire: bool = False,
+    only: Optional[str] = None,
+    no_snapshot: bool = False,
 ) -> int:
     """Execute the nightly routine for every target. Returns the worst exit code.
 
@@ -89,13 +104,17 @@ def run_updater(
     last-known-good refresh, prune, morning report. Used by install.sh to
     surface any first-run macOS permission prompts in the foreground.
     `only` restricts the run to one target (`mechanic run-now --target`).
+    `no_snapshot=True` skips the nightly snapshot and the last-known-good
+    refresh (CLI-only; the launchd nightly never sets it).
     """
     targets = build_targets(config, only=only)
     reports: list[RunReport] = []
     states: dict[str, SupervisorState] = {}
     worst = 0
     for target in targets:
-        report, state, code = _run_target(config, target, test_fire=test_fire)
+        report, state, code = _run_target(
+            config, target, test_fire=test_fire, no_snapshot=no_snapshot
+        )
         reports.append(report)
         states[target.name] = state
         worst = max(worst, code)
@@ -103,7 +122,9 @@ def run_updater(
     return worst
 
 
-def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[RunReport, SupervisorState, int]:
+def _run_target(
+    config: Config, target: Target, *, test_fire: bool, no_snapshot: bool = False
+) -> tuple[RunReport, SupervisorState, int]:
     name = target.name
     started_at = _now_iso()
     state = load_state(target=name)
@@ -169,14 +190,21 @@ def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[Run
 
     # 3. Snapshot.
     notes: list[str] = []
-    pre_note = target.pre_snapshot()
-    if pre_note:
-        notes.append(f"Pre-snapshot: {pre_note}")
+    snapshot: Optional[Snapshot] = None
     try:
-        snapshot = capture_snapshot(
-            store, kind=KIND_NIGHTLY, version=version_before,
-            verified_healthy=pre_verify.healthy, extra=target.snapshot_extra(),
-        )
+        if no_snapshot:
+            _LOG.warning(
+                "updater[%s]: --no-snapshot: skipping nightly snapshot; "
+                "NO rollback point for this run", name,
+            )
+        else:
+            pre_note = target.pre_snapshot()
+            if pre_note:
+                notes.append(f"Pre-snapshot: {pre_note}")
+            snapshot = capture_snapshot(
+                store, kind=KIND_NIGHTLY, version=version_before,
+                verified_healthy=pre_verify.healthy, extra=target.snapshot_extra(),
+            )
     except RollbackError as exc:
         _LOG.error("updater[%s]: snapshot capture failed: %s", name, exc)
         report = RunReport(
@@ -220,33 +248,57 @@ def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[Run
     verify_summary = post_verify.short_summary()
     version_after = post_verify.version
 
-    healthy = post_verify.healthy and doctor.aborted_prompt is None
+    # 8b. Gateway liveness, folded into the Verify line so it can never
+    # again read "healthy" while the gateway is dead.
+    gateway = target.check_gateway()
+    if gateway.was_down:
+        _LOG.error("updater[%s]: %s", name, gateway.summary())
+    else:
+        _LOG.info("updater[%s]: %s", name, gateway.summary())
+    verify_summary = f"{verify_summary}; {gateway.summary()}"
+
+    healthy = post_verify.healthy and doctor.aborted_prompt is None and gateway.ok
     doctor_warning = (not doctor.success) and doctor.aborted_prompt is None
 
     rollback_summary: Optional[str] = None
     if healthy:
-        try:
-            lkg = capture_snapshot(
-                store, kind=KIND_LAST_KNOWN_GOOD, version=version_after,
-                verified_healthy=True, extra=target.snapshot_extra(),
-            )
-            state = record_success(state, snapshot_id=lkg.snapshot_id)
-        except RollbackError as exc:
-            _LOG.warning("updater[%s]: could not refresh last-known-good: %s", name, exc)
-            state = record_success(state, snapshot_id=snapshot.snapshot_id)
+        if no_snapshot:
+            _LOG.warning("updater[%s]: --no-snapshot: not refreshing last-known-good", name)
+            state = record_success(state)
+        else:
+            try:
+                lkg = capture_snapshot(
+                    store, kind=KIND_LAST_KNOWN_GOOD, version=version_after,
+                    verified_healthy=True, extra=target.snapshot_extra(),
+                )
+                state = record_success(state, snapshot_id=lkg.snapshot_id)
+            except RollbackError as exc:
+                _LOG.warning("updater[%s]: could not refresh last-known-good: %s", name, exc)
+                state = record_success(
+                    state, snapshot_id=snapshot.snapshot_id if snapshot else None
+                )
         overall = "success"
     else:
         # No auto-rollback: restoring means stopping the live daemon, which
         # is too risky unattended. The operator decides.
-        restore_cmd = (
-            f"mechanic restore {snapshot.snapshot_id}" if name == "openclaw"
-            else f"mechanic restore --target {name} {snapshot.snapshot_id}"
-        )
-        _LOG.warning(
-            "updater[%s]: verify failed; NOT auto-rolling back. Run `%s` to revert.",
-            name, restore_cmd,
-        )
-        rollback_summary = f"NOT auto-rolled back. To revert: {restore_cmd}"
+        target_flag = "" if name == "openclaw" else f"--target {name} "
+        if snapshot is not None:
+            restore_cmd = f"mechanic restore {target_flag}{snapshot.snapshot_id}"
+            _LOG.warning(
+                "updater[%s]: verify failed; NOT auto-rolling back. Run `%s` to revert.",
+                name, restore_cmd,
+            )
+            rollback_summary = f"NOT auto-rolled back. To revert: {restore_cmd}"
+        else:
+            _LOG.warning(
+                "updater[%s]: verify failed and --no-snapshot was set; no snapshot "
+                "from this run to restore. `mechanic snapshots %s` lists earlier ones.",
+                name, target_flag.strip(),
+            )
+            rollback_summary = (
+                f"NOT auto-rolled back, and no snapshot was taken this run "
+                f"(--no-snapshot). `mechanic snapshots {target_flag.strip()}` lists earlier ones."
+            )
         state = record_failure(state, max_consecutive_failures=config.max_consecutive_failures)
         overall = "failed"
 
@@ -263,6 +315,12 @@ def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[Run
             f"Disk: emergency-pruned {len(emergency_pruned)} oldest nightly "
             f"snapshot(s) to make room for this run: {', '.join(emergency_pruned)}"
         ))
+    if no_snapshot:
+        notes.append(
+            "SNAPSHOTS SKIPPED (--no-snapshot): no nightly snapshot and no "
+            "last-known-good refresh were captured this run. There is NO rollback "
+            "point from this run. Manual/developer runs only."
+        )
     if test_fire:
         notes.append(
             "TEST FIRE: this run was triggered by install.sh to surface any "
@@ -292,7 +350,7 @@ def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[Run
         paused=state.paused,
         pause_reason=state.pause_reason,
         paused_at=state.paused_at,
-        snapshot_id=snapshot.snapshot_id,
+        snapshot_id=snapshot.snapshot_id if snapshot else None,
         version_before=version_before,
         version_after=version_after,
         update_summary=update_summary,
@@ -447,6 +505,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run only this target (openclaw or hermes). Default: every target in TARGETS.",
     )
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Skip the nightly snapshot and the last-known-good refresh (the tars that are "
+             "most of a run's wall-clock). Doctor, verify, gateway check and the report still "
+             "run. NO rollback point is captured. For manual/developer runs only; the launchd "
+             "nightly never sets this.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -460,10 +526,12 @@ def main(argv: list[str] | None = None) -> int:
         LOG_FILE,
         level=config.log_level,
         secrets=config.secret_values(),
-        also_stderr=args.test_fire,
+        also_stderr=args.test_fire or args.no_snapshot,
     )
     try:
-        return run_updater(config, test_fire=args.test_fire, only=args.target)
+        return run_updater(
+            config, test_fire=args.test_fire, only=args.target, no_snapshot=args.no_snapshot
+        )
     except ValueError as exc:
         logging.getLogger(__name__).error("updater: %s", exc)
         return 2

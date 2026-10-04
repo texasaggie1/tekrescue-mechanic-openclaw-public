@@ -36,13 +36,19 @@ Snapshot taken: 2026-09-13T07-00-02Z
 Update:   openclaw update --tag 2026.9.2 exit 0 (reports 2026.9.2)
 Install modified: yes
 Doctor:   exit 0, matched 0 known prompt(s)
-Verify:   healthy (2026.9.2, exit 0, 128 ms)
+Verify:   healthy (2026.9.2, exit 0, 128 ms); Gateway running (pid 57585).
 Last success: 2026-09-13T07:09:41+00:00
 Last known good: 2026-09-13T07-09-40Z
 
 Notes:
   - Waiting period (MIN_UPDATE_AGE_DAYS=7): 2026.9.2 (published 2026-09-05, 7 days old) is the newest release at least 7 days old; 2026.9.4 (published 2026-09-11, 1 day old) waits. Next: 2026.9.3 becomes eligible 2026-09-15T13:06Z.
 ```
+
+The `Verify:` line always ends with the gateway's state. A CLI that
+answers is not a gateway that serves: `openclaw --version` works fine
+with the gateway dead, and that once hid a 43-hour outage behind
+"healthy" reports. If the gateway was down, Mechanic restarts it and the
+line says so (`Gateway was DOWN; Mechanic restarted it (now pid ...)`).
 
 Most nights there is nothing old enough that you do not already have,
 and the report says so instead:
@@ -199,6 +205,7 @@ up changes on their next scheduled invocation.
 | `OPENCLAW_CONFIG_PATH` | Absolute path to OpenClaw's config directory (the one you back up). Usually `~/.openclaw`. |
 | `OPENCLAW_MIN_UPDATE_AGE_DAYS` | Optional. Overrides `MIN_UPDATE_AGE_DAYS` for OpenClaw only. |
 | `OPENCLAW_SKIP_VERSIONS` | Optional. Comma-separated versions Mechanic must never install. Versions npm marks deprecated are skipped on their own. |
+| `OPENCLAW_GATEWAY_AUTOHEAL` | Optional, default `true`. Restart the gateway when the heartbeat or the nightly finds it dead. Never applies to a gateway you have `launchctl disable`d. |
 
 ### Hermes (used when `hermes` is in `TARGETS`)
 
@@ -213,6 +220,7 @@ up changes on their next scheduled invocation.
 | `HERMES_SKIP_TAGS` | empty | Comma-separated release tags Mechanic must never pin to. |
 | `HERMES_DOCTOR_FIX` | `true` | Run `hermes doctor --fix` after an update (safe config migrations, unattended). `false` runs read-only `hermes doctor`. |
 | `HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS` | `2400` | How long `hermes gateway restart` may take; Hermes drains in-flight work first, up to 30 minutes by default. |
+| `HERMES_GATEWAY_AUTOHEAL` | `false` | Restart the Hermes gateway when it is found dead. Off by default because many Hermes operators run their own watchdog; Mechanic still reports a dead gateway as unhealthy. |
 
 ### Optional, with defaults
 
@@ -436,7 +444,8 @@ Other useful commands:
 | `mechanic plan [--target X]` | Show what tonight's run would do for each target, and why. Changes nothing. |
 | `mechanic logs -n 200` | Print the last 200 log lines. Add `-f` to follow live. |
 | `mechanic test-notifier` | Send a test message through your configured notifier. |
-| `mechanic run-now [--target X]` | Run the full nightly routine immediately (takes ~6 to 10 min per target). |
+| `mechanic run-now [--target X]` | Run the full nightly routine immediately (takes ~6 to 10 min per target). Add `--no-snapshot` to skip the tars (most of that time) when you are iterating on doctor or verify; it captures NO rollback point and says so in capitals. |
+| `mechanic snapshots [--target X]` | List a target's first-known-good, last-known-good, and nightly snapshots with sizes. |
 | `mechanic capture-first-good --target X` | Snapshot a target as the pristine pre-Mechanic baseline (refuses if it is currently unhealthy). |
 | `mechanic restore --target X <snapshot>` | Roll a target back to a snapshot: `first-known-good`, `last-known-good`, or a nightly id from the log. Stops the gateway, untars, puts Hermes's code back too, restarts. |
 | `mechanic resume --target X` | Clear a target's paused state and reset its failure counter. |
@@ -681,6 +690,20 @@ The report shows the checkout went back to its previous commit and the
 environment was rebuilt for it, so Hermes is where it was. Run
 `hermes pm status` and `hermes doctor` to see what the rebuild objected
 to; the Hermes log at `~/.hermes/logs/` has the detail.
+
+### The gateway dies at 02:00 on a Mac with EDR (Elastic, Todyl)
+
+`openclaw doctor --fix` stops the gateway to enter maintenance, then
+refuses to restart it if it cannot read every plist in
+`/Library/LaunchDaemons`. Elastic Defend's plist reads as permission
+denied at the endpoint-security layer while its mode bits look fine, so
+OpenClaw's own "unreadable, skip it" escape never fires and doctor exits
+with the gateway stopped. Mechanic runs doctor with
+`OPENCLAW_SERVICE_REPAIR_POLICY=external` so doctor does config repair
+only and never touches the service, and it checks for a live gateway
+PID after every run, restarting it if needed. You do not need an EDR
+exclusion for this; the plist is Defend protecting itself. Upstream
+issue: openclaw/openclaw#139813.
 
 ### Update fails with "unexpected packaged dist file dist/openclaw-install-guard"
 

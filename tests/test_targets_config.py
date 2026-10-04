@@ -34,6 +34,7 @@ def load_with(env: dict[str, str]):
         "HERMES_HOME", "HERMES_SOURCE_DIR", "HERMES_UPDATE_MODE", "HERMES_UPDATE_CHANNEL",
         "HERMES_MIN_UPDATE_AGE_DAYS", "HERMES_SKIP_TAGS", "HERMES_DOCTOR_FIX",
         "OPENCLAW_MIN_UPDATE_AGE_DAYS", "OPENCLAW_SKIP_VERSIONS", "MIN_UPDATE_AGE_DAYS",
+        "OPENCLAW_GATEWAY_AUTOHEAL", "HERMES_GATEWAY_AUTOHEAL",
     )}
     with mock.patch.dict(os.environ, {**cleared, **env}, clear=False):
         return load_config(MISSING_ENV)
@@ -47,6 +48,7 @@ class TargetsConfigTests(unittest.TestCase):
         self.assertIsNone(config.hermes)
         self.assertEqual(config.openclaw.min_update_age_days, 7)
         self.assertEqual(config.openclaw_bin_path, Path("/fake/openclaw"))
+        self.assertTrue(config.openclaw.gateway_autoheal)
 
     def test_hermes_only_needs_no_openclaw_paths(self) -> None:
         config = load_with({"TARGETS": "hermes"})
@@ -57,6 +59,7 @@ class TargetsConfigTests(unittest.TestCase):
         self.assertEqual(config.hermes.source_dir, Path.home() / ".hermes" / "hermes-agent")
         self.assertEqual(config.hermes.update_mode, "release-tag")
         self.assertTrue(config.hermes.doctor_fix)
+        self.assertFalse(config.hermes.gateway_autoheal)
         with self.assertRaises(ConfigError):
             _ = config.openclaw_bin_path
 
@@ -72,7 +75,11 @@ class TargetsConfigTests(unittest.TestCase):
             "HERMES_DOCTOR_FIX": "false",
             "HERMES_SOURCE_DIR": "/src/hermes-agent",
             "OPENCLAW_SKIP_VERSIONS": "2026.9.6",
+            "OPENCLAW_GATEWAY_AUTOHEAL": "false",
+            "HERMES_GATEWAY_AUTOHEAL": "true",
         })
+        self.assertFalse(config.openclaw.gateway_autoheal)
+        self.assertTrue(config.hermes.gateway_autoheal)
         self.assertEqual(config.targets, ("openclaw", "hermes"))
         self.assertEqual(config.openclaw.min_update_age_days, 10)
         self.assertEqual(config.openclaw.skip_versions, ("2026.9.6",))

@@ -68,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = sub.add_parser("run-now", help="Run the nightly update routine immediately (foreground).")
     add_target(run_p, help_text="Only this target (openclaw or hermes). Default: every target in TARGETS.")
+    run_p.add_argument(
+        "--no-snapshot", action="store_true",
+        help="Skip the snapshot and the last-known-good refresh (most of a run's wall-clock). "
+             "NO rollback point is captured. Manual/developer runs only.",
+    )
+
+    snaps_p = sub.add_parser("snapshots", help="List a target's snapshots: first/last-known-good and the nightlies.")
+    add_target(snaps_p, help_text="Which target (openclaw or hermes).")
 
     resume_p = sub.add_parser("resume", help="Clear paused state and reset the failure counter.")
     add_target(resume_p, help_text="Which target to resume (openclaw or hermes).")
@@ -110,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "plan":
         return _cmd_plan(args.target)
     if args.command == "run-now":
-        return _cmd_run_now(args.target)
+        return _cmd_run_now(args.target, no_snapshot=args.no_snapshot)
+    if args.command == "snapshots":
+        return _cmd_snapshots(args.target)
     if args.command == "resume":
         return _cmd_resume(args.target)
     if args.command == "restore":
@@ -396,17 +406,53 @@ def _cmd_plan(only: Optional[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_run_now(only: Optional[str]) -> int:
+def _cmd_run_now(only: Optional[str], *, no_snapshot: bool = False) -> int:
     from .updater import run_updater
     config = _load_config_or_die()
     if config is None:
         return 1
     _configure_logging(config, also_stderr=True)
     try:
-        return run_updater(config, only=only)
+        return run_updater(config, only=only, no_snapshot=no_snapshot)
     except ValueError as exc:
         print(f"{exc}")
         return 1
+
+
+def _cmd_snapshots(requested: Optional[str]) -> int:
+    from .rollback import KIND_FIRST_KNOWN_GOOD, KIND_LAST_KNOWN_GOOD, RollbackError, get_sticky, store_for
+
+    config = _load_config_or_die()
+    if config is None:
+        return 1
+    target = _pick_target(config, requested, verb="list")
+    if target is None:
+        return 1
+    store = store_for(config, target)
+    print(f"{target} snapshots under {store.root}")
+    for kind in (KIND_FIRST_KNOWN_GOOD, KIND_LAST_KNOWN_GOOD):
+        try:
+            snap = get_sticky(store, kind)
+        except RollbackError as exc:
+            print(f"  {kind:18} unreadable: {exc}")
+            continue
+        if snap is None:
+            print(f"  {kind:18} none")
+        else:
+            print(f"  {kind:18} {snap.captured_at}  version {snap.version or 'unknown'}"
+                  f"  {snap.archive_path.stat().st_size // (1024*1024)} MB")
+    nightlies = []
+    if store.nightly_dir.exists():
+        nightlies = sorted(p for p in store.nightly_dir.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if not nightlies:
+        print("  nightly            none")
+    for path in nightlies:
+        archive = path / "archive.tar.gz"
+        size = f"{archive.stat().st_size // (1024*1024)} MB" if archive.exists() else "no archive"
+        print(f"  nightly {path.name}  {size}")
+    flag = "" if len(config.targets) == 1 else f"--target {target} "
+    print(f"restore with: mechanic restore {flag}<first-known-good|last-known-good|nightly id>")
+    return 0
 
 
 def _pick_target(config: Config, requested: Optional[str], *, verb: str) -> Optional[str]:

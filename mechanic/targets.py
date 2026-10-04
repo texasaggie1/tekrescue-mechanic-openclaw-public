@@ -116,6 +116,18 @@ class Target:
         """True when the operator has `launchctl disable`d the gateway."""
         return daemon.is_disabled(self.service_label)
 
+    @property
+    def gateway_autoheal(self) -> bool:
+        return False
+
+    def check_gateway(self) -> daemon.GatewayCheck:
+        """Is the gateway process alive? Restart it if allowed (v0.1.4).
+
+        A `--version` probe answers happily with a dead gateway; this is the
+        check that caught nothing for 43 hours once. Never raises.
+        """
+        return daemon.check_gateway(self.service_label, autoheal=self.gateway_autoheal)
+
     def store(self) -> SnapshotStore:
         raise NotImplementedError
 
@@ -180,6 +192,10 @@ class OpenClawTarget(Target):
 
     def store(self) -> SnapshotStore:
         return openclaw_store(self.config)
+
+    @property
+    def gateway_autoheal(self) -> bool:
+        return self.settings.gateway_autoheal
 
     def npm_path(self) -> Optional[Path]:
         return find_npm(self.config)
@@ -311,6 +327,10 @@ class HermesTarget(Target):
     def store(self) -> SnapshotStore:
         return hermes_store(self.config)
 
+    @property
+    def gateway_autoheal(self) -> bool:
+        return self.settings.gateway_autoheal
+
     def probe(self) -> VerifyResult:
         return verify_binary(self.bin_path, label="Hermes")
 
@@ -349,7 +369,7 @@ class HermesTarget(Target):
         # Remember the gateway's state before anything moves; the restart
         # decision is made after doctor (post_install_hook), as `hermes
         # update` orders it: code, dependencies, config migration, restart.
-        self._gateway_was_running = daemon.is_loaded(self.service_label)
+        self._gateway_was_running = daemon.is_running(self.service_label)
 
         if plan.mode == hermes_release.MODE_HERMES_UPDATE:
             result = hermes_release.apply_hermes_update(self.settings, plan)

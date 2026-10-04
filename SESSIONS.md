@@ -64,7 +64,7 @@ Be honest about half-finished work.
   tar so a SQLite-safe state copy rides inside the archive. Mode
   `hermes-update` instead waits the same period then runs `hermes update
   --yes [--channel X]` (a trigger delay; Hermes cannot pin).
-- The operator off switch for the Clawgustus incident: a target whose
+- The operator off switch for the 2026-10-03 incident: a target whose
   gateway is `launchctl disable`d is skipped entirely (no CLI call) by the
   supervisor, the updater, `plan`, and `restore`; `daemon.start` refuses
   to start a disabled service. Plus, a product not in TARGETS is never
@@ -94,6 +94,21 @@ Be honest about half-finished work.
   troubleshooting entries, the "I shut a gateway down" entry), AGENTS.md
   (architecture, Hermes facts, the probe-restarts-gateway scar, the tag
   date rule, the restore rule), .env.example, install.sh text.
+- Later the same day, during the supervised walkthrough: discovered the
+  Mac mini runs the maintainer's PRIVATE repo at 0.1.5, and the
+  private-to-public sync had lapsed since 2026-09-06. Ported private
+  v0.1.4 and v0.1.5 into v0.2.0, target-aware: `daemon.running_pid` /
+  `check_gateway` / `ensure_running` (launchctl print, bootstrap,
+  kickstart -k), the gateway state folded into every Verify line and
+  heartbeat, `healthy` requires a live gateway, `OPENCLAW_GATEWAY_AUTOHEAL`
+  (default on) and `HERMES_GATEWAY_AUTOHEAL` (default off), the self-heal
+  refusing an operator-disabled service, `OPENCLAW_SERVICE_REPAIR_POLICY=
+  external` on doctor, `--no-snapshot` on mechanic-updater and run-now,
+  and a new `mechanic snapshots` listing (the private code referenced it
+  but never had it). Corrected the 2026-10-03 diagnosis: it was the
+  private v0.1.4 self-heal in the supervisor, not OpenClaw's CLI, that
+  restarted the booted-out gateway. Scrubbed the agent's name from this
+  file per the private repo's sync rule. 66 tests.
 
 ### Current state
 Code complete, unit-tested, and simulated. NOT run against a live Hermes
@@ -102,8 +117,8 @@ supervised walkthrough): Hermes IS a source install (launcher
 /Users/openclaw/.local/bin/hermes, checkout ~/.hermes/hermes-agent, git
 method, Python 3.14.7), clean working tree, HEAD 98d8ea7 at release date
 2026.9.24 and 430 commits behind main; `git describe` there preferred a
-canary tag, so describe_head now excludes `*+*` and `*-*`. Clawgustus
-(ai.openclaw.gateway, PID 32399) still running and enabled. Two operator
+canary tag, so describe_head now excludes `*+*` and `*-*`. The OpenClaw
+gateway (ai.openclaw.gateway) was still running and enabled. Two operator
 LaunchAgents sit beside Mechanic: com.texasaggie1.hermes-gateway-watchdog
 and com.texasaggie1.michael-hermes-backup (last exit 1).
 Unverified on a real Mac: that `hermes pm install` after a bare checkout
@@ -111,7 +126,7 @@ leaves the launcher and the launchd plist pointing at a working
 environment generation; that `hermes --version` reports the tag after a
 detached checkout; whether the install checkout is a partial clone (the
 tag fetch then lazily pulls blobs). The 2026-09-12 OpenClaw caveats
-(`--tag` path, channel key) still stand. To take Clawgustus offline now:
+(`--tag` path, channel key) still stand. To take the OpenClaw agent offline now:
 `TARGETS=hermes` in the .env (or `launchctl disable` before `bootout`).
 
 ### Decisions made
@@ -134,6 +149,10 @@ tag fetch then lazily pulls blobs). The 2026-09-12 OpenClaw caveats
   OpenClaw" stays the name, Hermes is documented as a second target.
 
 ### Open questions
+- The private repo must adopt v0.2.0 (copy the product files from its
+  `public/` checkout and commit there as v0.2.0) so the two lines agree
+  again; the maintainer owns that commit. Until then the Mac's venv can
+  point at the public checkout (`pip install -e public/`) and back.
 - Does `hermes pm install` after `git checkout --detach` republish the
   launcher / plist for a new Python generation, or is `hermes gateway
   restart` enough? If not, `_update_takeover.publish_launchers` is the
@@ -150,7 +169,7 @@ tag fetch then lazily pulls blobs). The 2026-09-12 OpenClaw caveats
    `mechanic run-now --target hermes`. Confirm the pin, `hermes --version`,
    `hermes gateway status`, and the report; capture the real
    `hermes --version` and `hermes pm status` output for the test fixtures.
-2. Merge to main once the supervised run passes, then disable Clawgustus
+2. Merge to main once the supervised run passes, then disable the OpenClaw gateway
    with `launchctl disable` + `bootout` and confirm the next heartbeat
    reports it as operator-disabled.
 3. Run `scripts/deps/relock.sh` for the idna/urllib3 bumps noted on
