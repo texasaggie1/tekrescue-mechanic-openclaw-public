@@ -40,8 +40,26 @@ Be honest about half-finished work.
 
 ## 2026-10-04 (UTC) - branch: main - v0.2.0 merged to main
 
-### Resume here (checkpoint rewritten 2026-10-04 ~19:10 UTC, after the merge to main)
-This is a supervised deployment in progress on the operator's Mac mini.
+### Resume here (checkpoint rewritten 2026-10-04 ~20:00 UTC: deployment COMPLETE)
+The supervised deployment on the operator's Mac mini finished on
+2026-10-04. Steps 1 to 5 below are done; what remains is watching and
+the maintainer's own follow-ups (step 6). The OpenClaw gateway was taken
+offline at ~19:55 UTC: domain gui/502, `launchctl disable` then
+`bootout`, `print-disabled` shows `"ai.openclaw.gateway" => disabled`
+(persists across reboots), `launchctl list` shows only Mechanic's two
+agents, Ollama still listening on 11434, the Hermes gateway untouched at
+pid 37096. The plist was left in place; `launchctl enable
+gui/502/ai.openclaw.gateway` plus `launchctl bootstrap gui/502
+~/Library/LaunchAgents/ai.openclaw.gateway.plist` brings it back.
+Lesson for the next operator check: `pgrep -fl openclaw` matches the
+macOS username in every path and environment string; use
+`pgrep -fl 'node_modules/openclaw|openclaw gateway|openclaw/dist'`.
+Watch next: the first unattended 02:00 nightly and the 240-minute
+heartbeats on Telegram, and the first real pin (when a Hermes tag newer
+than v2026.9.24 ages 7 days in the ledger). The block below is kept as
+the record of the walkthrough.
+
+This was a supervised deployment on the operator's Mac mini.
 If you are a fresh session, read this block before anything else; the
 operator pastes terminal output and expects the next command block. Every
 command block given to the operator must start with `cd` to an absolute
@@ -81,8 +99,8 @@ The Mac mini (user `openclaw`, uid 502):
   `com.texasaggie1.hermes-gateway-watchdog` (keep; it is why autoheal
   stays off) and a second operator agent that backs up Hermes (last exit 1,
   not ours, mention only).
-- OpenClaw: `ai.openclaw.gateway` still running and enabled in gui/502.
-  The operator wants it OFF; that is the last step below.
+- OpenClaw: `ai.openclaw.gateway` DISABLED and booted out of gui/502 on
+  2026-10-04 (step 5 below). Plist kept.
 - Mechanic state on the Mac after round 5 (`public/` at `5507be7`,
   `mechanic run-now --target hermes` at 13:34 local, 2026-10-04): STATUS
   SUCCESS, gateway found at pid 37096 in user/502, Doctor line one line
@@ -129,8 +147,8 @@ Exact next steps, in order (steps 1 to 4 done):
    name of every login item'`). Parent launchd (ppid 1) with an Ollama
    or Homebrew LaunchAgent, or the Ollama app in login items, means it
    is independent of OpenClaw.
-   Then take the OpenClaw agent offline, disable before bootout, in the
-   domain it lives in: `launchctl print gui/502/ai.openclaw.gateway`
+   DONE (~19:55 UTC): took the OpenClaw agent offline, disable before
+   bootout, in the domain it lives in: `launchctl print gui/502/ai.openclaw.gateway`
    (fall back to user/502), then `launchctl disable <domain>/ai.openclaw.gateway
    && launchctl bootout <domain>/ai.openclaw.gateway`; verify with
    `launchctl list | grep -i -E 'openclaw|mechanic'` and `pgrep -fl
