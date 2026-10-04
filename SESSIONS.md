@@ -38,9 +38,9 @@ Be honest about half-finished work.
 
 ---
 
-## 2026-10-04 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.0, Hermes Agent as a second target
+## 2026-10-04 (UTC) - branch: main - v0.2.0 merged to main
 
-### Resume here (checkpoint rewritten 2026-10-04 ~18:45 UTC, after round 5)
+### Resume here (checkpoint rewritten 2026-10-04 ~19:10 UTC, after the merge to main)
 This is a supervised deployment in progress on the operator's Mac mini.
 If you are a fresh session, read this block before anything else; the
 operator pastes terminal output and expects the next command block. Every
@@ -48,8 +48,9 @@ command block given to the operator must start with `cd` to an absolute
 path (their standing instruction).
 
 Where the code is:
-- Public repo, this branch, HEAD `0a848fd` (v0.2.0 plus the round 4
-  fixes). `main` is at `f5b9cac` (v0.1.4). Not merged.
+- Public repo: `main` and `claude/open-claw-version-delay-gr91ha` point
+  at the same commit (v0.2.0 with the round 4 fixes), fast-forwarded
+  2026-10-04 after round 5 passed on the Mac.
 - The maintainer's private line is at its v0.1.5; it has NOT adopted
   v0.2.0. Its public checkout lives in a `public/` subfolder of the
   private clone on the Mac; the maintainer owns the adoption commit.
@@ -64,8 +65,9 @@ The Mac mini (user `openclaw`, uid 502):
   own LaunchAgents `com.tekrescue.mechanic.supervisor` (every 240 min)
   and `com.tekrescue.mechanic.updater` (02:00 local) are loaded and run
   that venv, so they execute whatever `public/` is checked out at.
-- `.env` at `~/.config/tekrescue-mechanic/.env`: TARGETS includes
-  hermes (confirm with `grep TARGETS`), Telegram notifier, UPDATE_TIME
+- `.env` at `~/.config/tekrescue-mechanic/.env`: TARGETS=hermes only
+  (confirmed by `mechanic status`; OpenClaw is never constructed),
+  Telegram notifier, UPDATE_TIME
   02:00, SUPERVISOR_INTERVAL_MINUTES 240, SNAPSHOT_RETENTION_DAYS 30,
   OPENCLAW_BIN_PATH /opt/homebrew/bin/openclaw, HERMES_GATEWAY_AUTOHEAL
   off (default).
@@ -86,23 +88,20 @@ The Mac mini (user `openclaw`, uid 502):
   SUCCESS, gateway found at pid 37096 in user/502, Doctor line one line
   ("exit 1: 5 finding(s) need the operator", Hermes advice, not ours),
   last_success stamped, consecutive_failures reset to 0, last-known-good
-  captured (`2026-10-04T18-35-03Z`), no first-known-good yet. Snapshot
+  captured (`2026-10-04T18-35-03Z`), first-known-good captured at 13:41
+  local (386 MB), supervisor tick exit 0, `mechanic status` clean. Snapshot
   now 386 MB (tar 201 MB in 10 s plus state.db 204 MB gzipped) against
   813 MB in round 4. No notifier warning in the log (Telegram delivery
   to be confirmed by the operator). The round 4 nightly
   `2026-10-04T17-21-32Z` (813 MB) is still on disk; retention prunes it
   in 30 days, or the operator may delete that one directory now.
 
-Exact next steps, in order (round 6 onward; rounds 1 to 5 done):
+Exact next steps, in order (steps 1 to 4 done):
 1. DONE (round 5): pull to `5507be7`, real nightly SUCCESS as recorded
    above.
 2. DONE (round 5).
-3. `mechanic capture-first-good --target hermes`, then one
-   `mechanic-supervisor` run (`echo "exit $?"`), expect exit 0 and a
-   heartbeat on Telegram naming the gateway pid.
-4. Merge this branch to main (fast-forward), SESSIONS.md updated in the
-   same commit, scrub check before push (zero hits for IPs, the agent
-   names, hostnames, personal emails).
+3. DONE (13:41 local): first-known-good, supervisor exit 0, status clean.
+4. DONE: merged to main (fast-forward), this entry.
 5. BEFORE taking the OpenClaw agent offline, check who starts Ollama.
    Operator note (2026-10-04, from their Hermes session): Ollama must
    keep running on port 11434 after OpenClaw goes down; the operator's
@@ -135,6 +134,50 @@ Exact next steps, in order (round 6 onward; rounds 1 to 5 done):
    be touched is superseded by the operator's explicit request today and
    should be rewritten there; `scripts/deps/relock.sh` for the
    idna/urllib3 bumps.
+
+### What we did
+- Fast-forwarded `main` from `f5b9cac` (v0.1.4) to the v0.2.0 branch head
+  after rounds 1 to 5 of the supervised walkthrough on the Mac mini
+  (entry below) proved the Hermes nightly end to end on a live install:
+  SQLite online backup, tar, plan, doctor, verify, gateway check in the
+  right launchd domain, last-known-good, first-known-good, a supervisor
+  heartbeat, Telegram delivery. 84 tests.
+- The operator's .env lists TARGETS=hermes only; Mechanic on that machine
+  never constructs the OpenClaw target.
+
+### Current state
+v0.2.0 is on main and running unattended on the operator's Mac mini for
+Hermes (nightly 02:00 local, heartbeat every 240 min). Nothing to
+install until a Hermes tag newer than v2026.9.24 ages 7 days in the
+ledger, so the first real pin is still unproven on a live machine. Left
+on that machine: the Ollama pre-flight and the OpenClaw gateway shutdown
+(Resume block above). Branch and main are the same commit.
+
+### Decisions made
+- No git tags; releases are named in pyproject.toml and SESSIONS.md, as
+  before.
+- Mechanic does not manage Ollama or anything else a gateway spawns; the
+  README tells operators to check parentage before a bootout.
+
+### Open questions
+- Carried: the private line's adoption of v0.2.0; whether `hermes pm
+  install` republishes the launcher on a real pin night; the stable
+  channel.
+
+### Next session should
+1. Finish the Resume block: Ollama verdict, then the OpenClaw gateway
+   offline (disable before bootout, in its own domain).
+2. Watch the first unattended 02:00 nightly and the heartbeats for a
+   day; capture the real `hermes pm status` output for the fixtures.
+3. `scripts/deps/relock.sh` for the idna/urllib3 bumps.
+
+---
+
+## 2026-10-04 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.0, Hermes Agent as a second target
+
+### Resume here
+Moved to the entry above (the v0.2.0 merge entry), which carries the live
+checkpoint; this entry is the build log for v0.2.0.
 
 ### What we did
 - Mechanic is multi-target. `TARGETS=openclaw|hermes|openclaw,hermes`
