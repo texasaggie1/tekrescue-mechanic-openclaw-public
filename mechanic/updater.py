@@ -1,53 +1,44 @@
-"""Nightly update routine (v0.1.4).
+"""Nightly update routine (v0.2.0).
 
-Composes the steps documented in CLAUDE.md section 5:
+Runs once per target in TARGETS order (see targets.py). For each target:
 
-  0. Read supervisor state. If paused, log the reason and exit immediately.
-  1. Pre-flight disk check.
-  2. Pre-update verify. If OpenClaw is already broken, skip the update and
-     run doctor anyway in case it can fix the existing breakage.
+  0. Read the target's supervisor state. If paused, log the reason and
+     move on. If the operator has `launchctl disable`d the target's
+     gateway, skip the target entirely without running its CLI: OpenClaw's
+     CLI restarts its own gateway when probed (SESSIONS.md 2026-10-04).
+  1. Pre-flight disk check against the target's snapshot store.
+  2. Pre-update verify. If the target is already broken, skip the update
+     and run doctor anyway in case it can fix the existing breakage.
   3. Capture a nightly snapshot as a tar.gz archive (see rollback.py).
-  4. Update availability gate (new in v0.1.2): probe `openclaw update
-     status --json` and only proceed to the install when the registry has
-     a version newer than the installed one. `openclaw update --yes`
-     reinstalls the SAME version when nothing is newer, replacing every
-     file in dist/ and silently wiping operator-approved local patches
-     (found 2026-08-19 on the Mac Mini: nightly 02:05 mtimes on dist/
-     with an unchanged version, and the dreaming runtime override gone
-     every morning). If the probe errors, we also skip: not touching the
-     install is the safe default, and the supervisor heartbeat surfaces
-     the same probe error six times a day.
-  4b. Release waiting period (new in v0.1.4): when an update exists, ask
-     release_age.plan_update which version, if any, has been public on the
-     npm registry for MIN_UPDATE_AGE_DAYS (default 7). OpenClaw releases
-     every two or three days, so the plan usually names an older release
-     than the one OpenClaw advertises, installed with `--tag`. Anything the
-     plan cannot establish (npm missing, registry unreachable) resolves to
-     "leave the install alone" and is spelled out in the morning report.
-  5. When the gate passes, run `openclaw update --yes` (plus `--tag
-     <version>` when the plan pins one) via subprocess.run with a clean
-     env and stdin closed (CLAUDE.md section 8 hygiene).
-  6. Run `openclaw doctor --fix --non-interactive`, also via subprocess.run.
-     PROMPT_MODE and KNOWN_PROMPTS are dormant under --non-interactive and
-     reserved for v0.2 if/when we drop the flag.
-  7. Post-update hook (new in v0.1.2): whenever step 5 actually invoked
-     `openclaw update`, run the operator's POST_UPDATE_HOOK script so
-     approved local patches are re-applied on top of the fresh install.
-     Runs before post-verify so a hook that breaks OpenClaw is caught.
-  8. Post-update verify. **This is the authoritative health signal**;
-     doctor's exit code is informational only.
+     Hermes first runs `hermes backup --quick` so a SQLite-safe copy of its
+     state lands inside the archive.
+  4. Assess. OpenClaw: `openclaw update status --json`, then the npm
+     waiting period (release_age.py). Hermes: the release-tag waiting
+     period against origin's tags (hermes_release.py). Anything the
+     assessment cannot establish resolves to "leave the install alone"
+     and is spelled out in the morning report.
+  5. Apply, when the assessment says so. OpenClaw: `openclaw update --yes
+     --tag <version>`. Hermes: pin the checkout and `hermes pm install`
+     (or `hermes update --yes` in hermes-update mode), then a gateway
+     restart if one was running and not disabled.
+  6. Doctor: `openclaw doctor --fix --non-interactive` or
+     `hermes doctor [--fix]`. Exit codes are informational.
+  7. OpenClaw only: POST_UPDATE_HOOK after a real update, before verify.
+  8. Post-update verify. **The authoritative health signal.** Hermes also
+     checks the checkout landed on the expected commit, `hermes pm status`,
+     and `hermes gateway status` after a restart.
   9. On verify failure: log + notify, increment consecutive_failures,
      auto-pause at MAX_CONSECUTIVE_FAILURES. **NO auto-rollback.** The
-     morning report tells the operator: `mechanic restore <snapshot-id>`.
+     morning report tells the operator: `mechanic restore --target <t> <id>`.
  10. On verify success: reset consecutive_failures, stamp last_success,
-     and refresh last-known-good as a fresh tar.gz.
+     refresh last-known-good.
  11. Prune nightlies down to SNAPSHOT_RETENTION_DAYS entries.
- 12. Write the morning report to the log and the configured notifier. The
-     report always states whether the install was modified this run.
+ 12. One morning report covering every target, to the log and notifier.
 
-Entry points: `run_updater(config)` returns 0 healthy, 1 soft-fail (verify
-failed but Mechanic stayed up), 2 hard-fail (paused or pre-flight
-aborted). `main()` is the launchd-invoked CLI wrapper.
+Entry points: `run_updater(config)` returns 0 healthy, 1 soft-fail (a
+verify failed but Mechanic stayed up), 2 hard-fail (paused or pre-flight
+aborted), the worst across targets. `main()` is the launchd-invoked CLI
+wrapper.
 """
 
 from __future__ import annotations
@@ -59,16 +50,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .config import Config, LOG_FILE, clean_subprocess_env, load_config
-from .doctor_runner import (
-    DoctorError,
-    DoctorResult,
-    UnknownPromptAbort,
-    run_doctor,
-)
 from .logging_setup import configure_logging
 from .notifier import send as notify_send
-from .release_age import plan_update
-from .reporter import RunReport, format_report, short_subject
+from .reporter import RunReport, format_reports, short_subject
 from .rollback import (
     InsufficientDiskError,
     KIND_LAST_KNOWN_GOOD,
@@ -86,12 +70,8 @@ from .state import (
     record_success,
     save_state,
 )
-from .verifier import (
-    VerifyResult,
-    check_for_updates,
-    extract_version,
-    verify_openclaw,
-)
+from .targets import Target, UpdateOutcome, build_targets
+from .verifier import extract_version
 
 
 _LOG = logging.getLogger(__name__)
@@ -99,265 +79,240 @@ _LOG = logging.getLogger(__name__)
 UPDATE_TIMEOUT_SECONDS = 600
 
 
-def run_updater(config: Config, *, test_fire: bool = False) -> int:
-    """Execute the nightly routine. Returns a shell-style exit code.
+def run_updater(
+    config: Config, *, test_fire: bool = False, only: Optional[str] = None
+) -> int:
+    """Execute the nightly routine for every target. Returns the worst exit code.
 
-    When `test_fire=True`, step 4 (`openclaw update --yes`) is skipped. Every
-    other step runs as normal: snapshot, doctor, post-verify, last-known-good
-    refresh, prune, morning report. The report includes a clear "TEST FIRE"
-    annotation so the operator (or notifier recipient) understands the
-    openclaw update step was deliberately not exercised. Used by
-    install.sh to surface any first-run macOS permission prompts in
-    foreground while the operator is still at the terminal.
+    When `test_fire=True`, the install step is skipped for every target.
+    Everything else runs as normal: snapshot, doctor, post-verify,
+    last-known-good refresh, prune, morning report. Used by install.sh to
+    surface any first-run macOS permission prompts in the foreground.
+    `only` restricts the run to one target (`mechanic run-now --target`).
     """
+    targets = build_targets(config, only=only)
+    reports: list[RunReport] = []
+    states: dict[str, SupervisorState] = {}
+    worst = 0
+    for target in targets:
+        report, state, code = _run_target(config, target, test_fire=test_fire)
+        reports.append(report)
+        states[target.name] = state
+        worst = max(worst, code)
+    _emit_reports(config, reports, states)
+    return worst
+
+
+def _run_target(config: Config, target: Target, *, test_fire: bool) -> tuple[RunReport, SupervisorState, int]:
+    name = target.name
     started_at = _now_iso()
-    state = load_state()
+    state = load_state(target=name)
 
     if state.paused:
         _LOG.warning(
-            "updater: paused (%s since %s); exiting without running",
-            state.pause_reason,
-            state.paused_at,
+            "updater[%s]: paused (%s since %s); skipping",
+            name, state.pause_reason, state.paused_at,
         )
         report = RunReport(
-            started_at=started_at,
-            finished_at=_now_iso(),
-            paused=True,
-            pause_reason=state.pause_reason,
-            paused_at=state.paused_at,
-            notes=["Updater exited because supervisor state is paused."],
+            target=name, started_at=started_at, finished_at=_now_iso(),
+            paused=True, pause_reason=state.pause_reason, paused_at=state.paused_at,
+            notes=[f"Updater skipped {target.display_name} because its supervisor state is paused."],
         )
-        _emit_report(config, report, state)
-        return 2
+        return report, state, 2
+
+    # 0b. Operator off switch: a disabled gateway means hands off, CLI and all.
+    if target.disabled_by_operator():
+        _LOG.warning(
+            "updater[%s]: gateway %s is disabled by the operator; not running %s at all",
+            name, target.service_label, target.display_name,
+        )
+        report = RunReport(
+            target=name, started_at=started_at, finished_at=_now_iso(),
+            overall="skipped",
+            notes=[
+                f"{target.display_name}'s gateway ({target.service_label}) is disabled "
+                f"by the operator (launchctl disable). Mechanic did not run "
+                f"{target.display_name}'s CLI. Enable it, or drop {name} from TARGETS, "
+                f"to change that."
+            ],
+        )
+        return report, state, 0
 
     state = record_run_start(state)
-    save_state(state)
+    save_state(state, target=name)
 
     # 1. Pre-flight disk check. May emergency-prune the oldest nightly
     # snapshots to make room for this run; see ensure_disk_headroom.
+    store = target.store()
     try:
-        emergency_pruned = ensure_disk_headroom(config)
-    except InsufficientDiskError as exc:
-        _LOG.error("updater: %s", exc)
-        report = RunReport(
-            started_at=started_at,
-            finished_at=_now_iso(),
-            overall="aborted",
-            notes=[f"Pre-flight disk check failed: {exc}"],
+        emergency_pruned = ensure_disk_headroom(
+            store, min_free_mb=config.min_free_disk_mb_for_snapshot
         )
-        _emit_report(config, report, state)
-        return 2
+    except InsufficientDiskError as exc:
+        _LOG.error("updater[%s]: %s", name, exc)
+        report = RunReport(
+            target=name, started_at=started_at, finished_at=_now_iso(),
+            overall="aborted", notes=[f"Pre-flight disk check failed: {exc}"],
+        )
+        return report, state, 2
 
     # 2. Pre-update verify.
-    pre_verify = verify_openclaw(config)
+    pre_verify = target.probe()
     version_before = pre_verify.version
-    openclaw_was_broken = not pre_verify.healthy
-    if openclaw_was_broken:
+    was_broken = not pre_verify.healthy
+    if was_broken:
         _LOG.warning(
-            "updater: OpenClaw is already broken pre-update (%s); "
+            "updater[%s]: %s is already broken pre-update (%s); "
             "skipping update step, running doctor anyway",
-            pre_verify.short_summary(),
+            name, target.display_name, pre_verify.short_summary(),
         )
 
     # 3. Snapshot.
+    notes: list[str] = []
+    pre_note = target.pre_snapshot()
+    if pre_note:
+        notes.append(f"Pre-snapshot: {pre_note}")
     try:
         snapshot = capture_snapshot(
-            config,
-            kind=KIND_NIGHTLY,
-            openclaw_version=version_before,
-            verified_healthy=pre_verify.healthy,
+            store, kind=KIND_NIGHTLY, version=version_before,
+            verified_healthy=pre_verify.healthy, extra=target.snapshot_extra(),
         )
     except RollbackError as exc:
-        _LOG.error("updater: snapshot capture failed: %s", exc)
+        _LOG.error("updater[%s]: snapshot capture failed: %s", name, exc)
         report = RunReport(
-            started_at=started_at,
-            finished_at=_now_iso(),
-            overall="aborted",
-            notes=[f"Snapshot capture failed: {exc}"],
+            target=name, started_at=started_at, finished_at=_now_iso(),
+            overall="aborted", notes=notes + [f"Snapshot capture failed: {exc}"],
         )
-        _emit_report(config, report, state)
-        return 2
+        return report, state, 2
 
-    # 4 + 5. Update, gated on actual availability. `openclaw update --yes`
-    # reinstalls the same version when nothing newer exists, which replaces
-    # every file in dist/ and wipes operator-applied local patches, so we
-    # never invoke it unless the registry really has something new.
-    install_modified = False
+    # 4 + 5. Assess and apply.
+    outcome: Optional[UpdateOutcome] = None
     waiting_note: Optional[str] = None
     if test_fire:
-        update_summary = "skipped (--test-fire; openclaw update not invoked)"
-    elif openclaw_was_broken:
-        update_summary = "skipped (OpenClaw already broken pre-update)"
+        update_summary = f"skipped (--test-fire; {target.display_name} update not invoked)"
+    elif was_broken:
+        update_summary = f"skipped ({target.display_name} already broken pre-update)"
     else:
-        availability = check_for_updates(config)
-        if availability.error is not None:
-            update_summary = (
-                f"skipped (update check failed: {availability.error}; "
-                f"not touching the install)"
-            )
-            _LOG.warning("updater: %s", update_summary)
-        elif not availability.available:
-            installed = version_before or "unknown"
-            update_summary = (
-                f"skipped (no update available; installed {installed} "
-                f"is the registry latest)"
-            )
-            _LOG.info("updater: %s", update_summary)
+        assessment = target.assess(pre_verify)
+        waiting_note = assessment.waiting_note
+        notes.extend(assessment.notes)
+        if not assessment.install:
+            update_summary = assessment.skip_summary
+            level = _LOG.warning if assessment.error else _LOG.info
+            level("updater[%s]: %s", name, assessment.reason)
         else:
-            plan = plan_update(
-                config,
-                installed_version=version_before,
-                availability=availability,
-            )
-            waiting_note = (
-                f"Waiting period (MIN_UPDATE_AGE_DAYS="
-                f"{config.min_update_age_days}): {plan.reason}"
-            )
-            if not plan.install:
-                if plan.error:
-                    update_summary = "skipped (waiting period could not be applied; see notes)"
-                    _LOG.warning("updater: %s", plan.reason)
-                else:
-                    update_summary = "skipped (waiting period; see notes)"
-                    _LOG.info("updater: %s", plan.reason)
-            else:
-                _LOG.info(
-                    "updater: update available (%s -> %s); %s; running openclaw update",
-                    version_before or "unknown",
-                    plan.target_version or availability.latest_version or "unknown",
-                    plan.reason,
-                )
-                update_summary = _run_openclaw_update(
-                    config,
-                    target_version=plan.target_version if plan.use_tag else None,
-                )
-                install_modified = True
+            _LOG.info("updater[%s]: %s", name, assessment.reason)
+            outcome = target.apply(assessment)
+            update_summary = outcome.summary
+            notes.extend(f"Step: {step}" for step in outcome.notes)
 
     # 6. Doctor.
-    doctor_summary, doctor_result, doctor_aborted_prompt = _run_doctor_step(config)
+    doctor = target.doctor()
 
-    # 7. Post-update hook: re-apply operator-approved local patches after
-    # any run that invoked `openclaw update`. Runs before post-verify so a
-    # hook that breaks OpenClaw is caught by the authoritative signal.
+    # 7. Post-install hook (OpenClaw): re-apply operator patches after any
+    # run that invoked the product's own updater, before post-verify.
     hook_summary: Optional[str] = None
-    if install_modified:
-        hook_summary = _run_post_update_hook(config)
+    if outcome is not None and outcome.install_modified:
+        hook_summary = target.post_install_hook(outcome)
 
-    # 8. Post-update verify.
-    post_verify = verify_openclaw(config)
+    # 8. Post-update verify: the authoritative signal.
+    post_verify = target.verify(outcome)
     verify_summary = post_verify.short_summary()
     version_after = post_verify.version
 
-    # Post-verify is the authoritative signal: if OpenClaw answers a probe
-    # cleanly after the routine, OpenClaw is healthy. Doctor exit codes go
-    # in the report for visibility but do not override the verifier; doctor
-    # can exit non-zero for warnings ("found things I couldn't fully fix")
-    # while OpenClaw itself remains operational.
-    healthy = post_verify.healthy and doctor_aborted_prompt is None
-    doctor_warning = (
-        doctor_result is not None
-        and not doctor_result.success
-        and doctor_aborted_prompt is None
-    )
+    healthy = post_verify.healthy and doctor.aborted_prompt is None
+    doctor_warning = (not doctor.success) and doctor.aborted_prompt is None
 
     rollback_summary: Optional[str] = None
     if healthy:
-        # Success path.
         try:
             lkg = capture_snapshot(
-                config,
-                kind=KIND_LAST_KNOWN_GOOD,
-                openclaw_version=version_after,
-                verified_healthy=True,
+                store, kind=KIND_LAST_KNOWN_GOOD, version=version_after,
+                verified_healthy=True, extra=target.snapshot_extra(),
             )
             state = record_success(state, snapshot_id=lkg.snapshot_id)
         except RollbackError as exc:
-            _LOG.warning("updater: could not refresh last-known-good: %s", exc)
+            _LOG.warning("updater[%s]: could not refresh last-known-good: %s", name, exc)
             state = record_success(state, snapshot_id=snapshot.snapshot_id)
         overall = "success"
     else:
-        # v0.1.1 failure path: log + notify, no auto-rollback. OpenClaw is a
-        # live daemon, so rolling back its config dir requires stopping the
-        # daemon, and that is too risky for an unattended nightly. Operator
-        # decides: `mechanic restore <snapshot-id>` does the daemon dance.
+        # No auto-rollback: restoring means stopping the live daemon, which
+        # is too risky unattended. The operator decides.
+        restore_cmd = (
+            f"mechanic restore {snapshot.snapshot_id}" if name == "openclaw"
+            else f"mechanic restore --target {name} {snapshot.snapshot_id}"
+        )
         _LOG.warning(
-            "updater: verify failed; NOT auto-rolling back. "
-            "Run `mechanic restore %s` to revert.",
-            snapshot.snapshot_id,
+            "updater[%s]: verify failed; NOT auto-rolling back. Run `%s` to revert.",
+            name, restore_cmd,
         )
-        rollback_summary = (
-            f"NOT auto-rolled back. To revert: mechanic restore {snapshot.snapshot_id}"
-        )
-        state = record_failure(
-            state, max_consecutive_failures=config.max_consecutive_failures
-        )
+        rollback_summary = f"NOT auto-rolled back. To revert: {restore_cmd}"
+        state = record_failure(state, max_consecutive_failures=config.max_consecutive_failures)
         overall = "failed"
 
     # 11. Prune.
-    pruned = prune_nightlies(config)
+    pruned = prune_nightlies(store, keep=config.snapshot_retention_days)
     if pruned:
-        _LOG.info("updater: pruned %d nightly snapshots", len(pruned))
+        _LOG.info("updater[%s]: pruned %d nightly snapshots", name, len(pruned))
 
-    save_state(state)
+    save_state(state, target=name)
 
-    # 12. Morning report.
-    notes: list[str] = []
+    # 12. Report facts.
     if emergency_pruned:
-        notes.append(
+        notes.insert(0, (
             f"Disk: emergency-pruned {len(emergency_pruned)} oldest nightly "
-            f"snapshot(s) to make room for this run: "
-            f"{', '.join(emergency_pruned)}"
-        )
+            f"snapshot(s) to make room for this run: {', '.join(emergency_pruned)}"
+        ))
     if test_fire:
         notes.append(
             "TEST FIRE: this run was triggered by install.sh to surface any "
-            "first-run macOS permission prompts. The openclaw update step was "
+            "first-run macOS permission prompts. The update step was "
             "deliberately skipped; everything else ran normally."
         )
-    if doctor_aborted_prompt:
+    if doctor.aborted_prompt:
         notes.append(
-            f"Doctor aborted on unrecognised prompt: {doctor_aborted_prompt!r}. "
+            f"Doctor aborted on unrecognised prompt: {doctor.aborted_prompt!r}. "
             f"Run `mechanic capture-prompts` to teach Mechanic the answer."
         )
-    if openclaw_was_broken:
-        notes.append("OpenClaw was already unhealthy pre-update; update step was skipped.")
+    if was_broken:
+        notes.append(f"{target.display_name} was already unhealthy pre-update; update step was skipped.")
     if waiting_note:
         notes.append(waiting_note)
     if doctor_warning:
+        code = f" ({doctor.exit_code})" if doctor.exit_code is not None else ""
         notes.append(
-            f"Doctor exited non-zero ({doctor_result.exit_code}) but OpenClaw "
-            f"verify still passed. This usually means doctor reported warnings "
-            f"it could not auto-fix. Review with: openclaw doctor --lint"
+            f"Doctor exited non-zero{code} but verify still passed. This usually "
+            f"means doctor reported warnings it could not auto-fix."
         )
 
     report = RunReport(
+        target=name,
         started_at=started_at,
         finished_at=_now_iso(),
         paused=state.paused,
         pause_reason=state.pause_reason,
         paused_at=state.paused_at,
         snapshot_id=snapshot.snapshot_id,
-        openclaw_version_before=version_before,
-        openclaw_version_after=version_after,
+        version_before=version_before,
+        version_after=version_after,
         update_summary=update_summary,
-        install_modified=install_modified,
+        install_modified=bool(outcome and outcome.install_modified),
         hook_summary=hook_summary,
-        doctor_summary=doctor_summary,
+        hook_label=target.post_install_label,
+        doctor_summary=doctor.summary,
         verify_summary=verify_summary,
         rollback_summary=rollback_summary,
         overall=overall,
         notes=notes,
     )
-    _emit_report(config, report, state)
-
     if state.paused:
-        return 2
+        return report, state, 2
     if not healthy:
-        return 1
-    return 0
+        return report, state, 1
+    return report, state, 0
 
 
-def _run_openclaw_update(config: Config, *, target_version: Optional[str] = None) -> str:
+def run_openclaw_update(config: Config, *, target_version: Optional[str] = None) -> str:
     """Run `openclaw update --yes`, pinned with `--tag` when the plan says so.
 
     `--tag <version>` is OpenClaw's own one-shot override of the package
@@ -399,7 +354,7 @@ def _run_openclaw_update(config: Config, *, target_version: Optional[str] = None
     return f"{label} exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:200]}"
 
 
-def _run_post_update_hook(config: Config) -> str:
+def run_post_update_hook(config: Config) -> str:
     """Run the operator's POST_UPDATE_HOOK after an install-modifying update.
 
     The hook exists so operator-approved local patches (applied on top of
@@ -459,36 +414,10 @@ def _run_post_update_hook(config: Config) -> str:
     )
 
 
-def _run_doctor_step(
-    config: Config,
-) -> tuple[str, Optional[DoctorResult], Optional[str]]:
-    try:
-        result = run_doctor(config)
-    except UnknownPromptAbort as abort:
-        _LOG.error("updater: %s", abort)
-        return (
-            f"aborted on unknown prompt under {abort.mode}",
-            None,
-            abort.prompt_text,
-        )
-    except DoctorError as exc:
-        _LOG.error("updater: doctor failed: %s", exc)
-        return (f"doctor failed: {exc}", None, None)
-
-    if result.success:
-        summary = (
-            f"exit 0, matched {len(result.matched_prompts)} known prompt(s)"
-            f"{', AUTO_YES answered ' + str(len(result.auto_yes_prompts)) if result.auto_yes_prompts else ''}"
-        )
-    else:
-        summary = result.reason or "doctor failed without a reason"
-    return summary, result, None
-
-
-def _emit_report(config: Config, report: RunReport, state: SupervisorState) -> None:
-    rendered = format_report(report, state)
+def _emit_reports(config: Config, reports: list[RunReport], states: dict[str, SupervisorState]) -> None:
+    rendered = format_reports(reports, states)
     _LOG.info("morning report:\n%s", rendered)
-    subject = short_subject(report)
+    subject = short_subject(reports)
     result = notify_send(config, subject, rendered)
     if not result.delivered and result.kind != "none":
         _LOG.warning("notifier did not deliver: %s", result.error)
@@ -499,7 +428,7 @@ def _now_iso() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Launchd-invoked entry point. `--test-fire` skips the openclaw update step."""
+    """Launchd-invoked entry point. `--test-fire` skips the update step."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -509,9 +438,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--test-fire",
         action="store_true",
-        help="Skip the `openclaw update` step but run everything else "
+        help="Skip the update step but run everything else "
              "(snapshot, doctor, verify, last-known-good refresh, report). "
              "Used by install.sh to surface first-run macOS permission prompts.",
+    )
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="Run only this target (openclaw or hermes). Default: every target in TARGETS.",
     )
     args = parser.parse_args(argv)
 
@@ -528,7 +462,11 @@ def main(argv: list[str] | None = None) -> int:
         secrets=config.secret_values(),
         also_stderr=args.test_fire,
     )
-    return run_updater(config, test_fire=args.test_fire)
+    try:
+        return run_updater(config, test_fire=args.test_fire, only=args.target)
+    except ValueError as exc:
+        logging.getLogger(__name__).error("updater: %s", exc)
+        return 2
 
 
 if __name__ == "__main__":

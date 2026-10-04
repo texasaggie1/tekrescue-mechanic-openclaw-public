@@ -35,6 +35,13 @@ available to cross the age line, then updates to exactly that version
 (plain `openclaw update --yes` on extended-stable and dev, where OpenClaw
 does not accept `--tag`).
 
+Two more gates (v0.2.0): a candidate that npm marks deprecated is skipped
+(upstream's own way of pulling a bad version without unpublishing it), and
+so is anything in OPENCLAW_SKIP_VERSIONS, the operator's blocklist for a
+security advisory that upstream has not acted on. The next-newest eligible
+version is tried in turn. The waiting period buys humans time; it does not
+read advisories, so the blocklist exists.
+
 Any failure to establish dates (npm missing, registry unreachable, the
 reported version absent from the registry, installed version unknown)
 resolves to "do not install", Mechanic's safe default everywhere.
@@ -52,7 +59,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import Config, clean_subprocess_env
 from .verifier import UpdateAvailability
@@ -105,6 +112,7 @@ class UpdatePlan:
     error: Optional[str] = None
     next_version: Optional[str] = None
     next_eligible_at: Optional[datetime] = None
+    notes: tuple[str, ...] = ()
 
 
 def find_npm(config: Config) -> Optional[Path]:
@@ -168,6 +176,40 @@ def fetch_registry_snapshot(
     return parse_registry_payload(payload, npm_path=npm)
 
 
+def fetch_deprecation(config: Config, version: str) -> Optional[str]:
+    """`npm view openclaw@<version> deprecated`: the message, or None.
+
+    A read failure is treated as "not deprecated" and logged: the waiting
+    period itself does not depend on this answer, and the registry read
+    that does (fetch_registry_snapshot) has already succeeded.
+    """
+    npm = find_npm(config)
+    if npm is None:
+        return None
+    cmd = [str(npm), "view", f"{PACKAGE_NAME}@{version}", "deprecated", "--json"]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            env=clean_subprocess_env(), timeout=NPM_VIEW_TIMEOUT_SECONDS, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        _LOG.warning("release_age: deprecation check for %s failed: %s", version, exc)
+        return None
+    if proc.returncode != 0:
+        _LOG.warning("release_age: deprecation check for %s exit %s", version, proc.returncode)
+        return None
+    text = (proc.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        value = text
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def parse_registry_payload(
     payload: object, *, npm_path: Path
 ) -> tuple[Optional[RegistrySnapshot], Optional[str]]:
@@ -215,6 +257,7 @@ def plan_update(
     availability: UpdateAvailability,
     now: Optional[datetime] = None,
     snapshot: Optional[RegistrySnapshot] = None,
+    deprecation_check: Optional[Callable[[str], Optional[str]]] = None,
 ) -> UpdatePlan:
     """Decide what to install tonight, given that OpenClaw reports an update.
 
@@ -226,12 +269,18 @@ def plan_update(
         now: Injectable clock (UTC) for tests. Defaults to the real one.
         snapshot: Injectable registry snapshot for tests. When None, the
             registry is queried through npm.
+        deprecation_check: Returns npm's deprecation message for a version,
+            or None. Defaults to fetch_deprecation through npm; tests inject.
 
     Returns:
         An UpdatePlan. Never raises; every failure becomes a plan with
         `install=False` and a human-readable `reason`.
     """
-    min_age = config.min_update_age_days
+    settings = config.openclaw
+    min_age = settings.min_update_age_days if settings else config.min_update_age_days
+    skip = tuple(settings.skip_versions) if settings else ()
+    if deprecation_check is None:
+        deprecation_check = lambda version: fetch_deprecation(config, version)  # noqa: E731
     latest = availability.latest_version
     if min_age <= 0:
         return UpdatePlan(
@@ -264,11 +313,13 @@ def plan_update(
     if channel == STABLE_CHANNEL:
         return _plan_stable(
             snapshot, installed_version=installed_version, latest=latest,
-            min_age=min_age, now=now, cutoff=cutoff,
+            min_age=min_age, now=now, cutoff=cutoff, skip=skip,
+            deprecation_check=deprecation_check,
         )
     return _plan_other_channel(
         snapshot, channel=channel, latest=latest,
-        min_age=min_age, now=now, cutoff=cutoff,
+        min_age=min_age, now=now, cutoff=cutoff, skip=skip,
+        deprecation_check=deprecation_check,
     )
 
 
@@ -280,7 +331,10 @@ def _plan_stable(
     min_age: int,
     now: datetime,
     cutoff: datetime,
+    skip: tuple[str, ...] = (),
+    deprecation_check: Optional[Callable[[str], Optional[str]]] = None,
 ) -> UpdatePlan:
+    notes: list[str] = []
     ceiling = snapshot.latest or latest
     ceiling_key = version_key(ceiling) if ceiling else None
 
@@ -293,17 +347,32 @@ def _plan_stable(
         v for v, stamp in snapshot.published.items()
         if in_scope(v) and stamp <= cutoff
     ]
-    if not eligible:
+    # Newest first; drop blocklisted and deprecated versions in turn. The
+    # deprecation check is one registry read per version examined and is
+    # only run for versions that would otherwise be the target.
+    eligible.sort(key=version_key, reverse=True)
+    target: Optional[str] = None
+    for candidate in eligible:
+        if candidate in skip:
+            notes.append(f"{candidate} skipped (OPENCLAW_SKIP_VERSIONS)")
+            continue
+        message = deprecation_check(candidate) if deprecation_check else None
+        if message:
+            notes.append(f"{candidate} skipped (deprecated on npm: {message[:120]})")
+            continue
+        target = candidate
+        break
+    if target is None:
         return UpdatePlan(
             install=False,
             target_version=None,
             use_tag=False,
             reason=(
                 f"no OpenClaw release on the registry is {_days(min_age)} old "
-                f"yet; Mechanic waits until one is."
+                f"and acceptable yet; Mechanic waits until one is."
             ),
+            notes=tuple(notes),
         )
-    target = max(eligible, key=version_key)
 
     # The release that will next cross the age line AND would move the
     # target: the earliest-published version newer than the target.
@@ -337,6 +406,7 @@ def _plan_stable(
             error="installed version unknown",
             next_version=next_version,
             next_eligible_at=next_eligible_at,
+            notes=tuple(notes),
         )
 
     if version_key(target) <= version_key(installed_version):
@@ -363,6 +433,7 @@ def _plan_stable(
             reason=lead + standing + next_sentence,
             next_version=next_version,
             next_eligible_at=next_eligible_at,
+            notes=tuple(notes),
         )
 
     reason = (
@@ -379,6 +450,7 @@ def _plan_stable(
         reason=reason,
         next_version=next_version,
         next_eligible_at=next_eligible_at,
+        notes=tuple(notes),
     )
 
 
@@ -390,7 +462,23 @@ def _plan_other_channel(
     min_age: int,
     now: datetime,
     cutoff: datetime,
+    skip: tuple[str, ...] = (),
+    deprecation_check: Optional[Callable[[str], Optional[str]]] = None,
 ) -> UpdatePlan:
+    if latest and latest in skip:
+        return UpdatePlan(
+            install=False, target_version=None, use_tag=False,
+            reason=f"{latest} ({channel} channel) is in OPENCLAW_SKIP_VERSIONS; leaving the install alone.",
+            notes=(f"{latest} skipped (OPENCLAW_SKIP_VERSIONS)",),
+        )
+    if latest and deprecation_check:
+        message = deprecation_check(latest)
+        if message:
+            return UpdatePlan(
+                install=False, target_version=None, use_tag=False,
+                reason=f"{latest} ({channel} channel) is deprecated on npm ({message[:120]}); leaving the install alone.",
+                notes=(f"{latest} skipped (deprecated on npm)",),
+            )
     if not latest:
         return UpdatePlan(
             install=False,
@@ -446,12 +534,15 @@ def version_key(version: str) -> tuple[tuple[int, int, int], int, tuple]:
     OpenClaw's calendar versions (2026.9.4) are valid semver, so the usual
     rules apply: numeric major.minor.patch, and a version with a
     prerelease suffix (2026.9.1-beta.1, 2026.2.2-1) sorts BELOW the bare
-    version. Build metadata after `+` is ignored. Unparseable input sorts
-    lowest rather than raising, because the caller is an unattended job.
+    version. Build metadata after `+` is ignored, and so is a leading `v`
+    (Hermes's git tags are vX.Y.Z). Unparseable input sorts lowest rather
+    than raising, because the caller is an unattended job.
     """
     core, _, rest = version.partition("-")
-    core = core.split("+", 1)[0]
-    match = _VERSION_CORE.match(core.strip())
+    core = core.split("+", 1)[0].strip()
+    if core[:1] in ("v", "V"):
+        core = core[1:]
+    match = _VERSION_CORE.match(core)
     if match:
         numbers = tuple(int(group) if group else 0 for group in match.groups())
     else:

@@ -36,13 +36,16 @@ print_warning() {
   tekRESCUE Mechanic for OpenClaw - before you install
 ================================================================
 
-Mechanic schedules nightly maintenance against OpenClaw. It runs
-`openclaw update` and `openclaw doctor --fix` while you sleep,
-verifies the result, and tells you exactly how to roll back if something looks wrong.
+Mechanic schedules nightly maintenance against OpenClaw and/or
+Hermes Agent (whichever TARGETS lists). It updates them a week
+behind the newest release, runs their doctors while you sleep,
+verifies the result, and tells you exactly how to roll back if
+something looks wrong.
 
 The blast radius is small but real. Back up OpenClaw's config
-directory before you run this installer the first time. Mechanic
-will not take that first backup for you.
+directory (and run `hermes backup` if you use Hermes) before you
+run this installer the first time. Mechanic will not take that
+first backup for you.
 
 This software ships with NO WARRANTY. We are not responsible if
 Godzilla tears down your server farm or if this script deletes
@@ -59,7 +62,7 @@ confirm_backup() {
     fi
     print_warning
     echo
-    read -r -p "Have you backed up OpenClaw's config directory? [y/N] " answer
+    read -r -p "Have you backed up your agent's data (OpenClaw config dir, hermes backup)? [y/N] " answer
     case "${answer:-N}" in
         y|Y|yes|YES)
             echo "Backup confirmed. Proceeding."
@@ -225,6 +228,10 @@ fi
 # updater fires unattended and the prompt lands in Notification Center.
 OPENCLAW_BIN_VAL="$(grep -E '^OPENCLAW_BIN_PATH=' "${CONFIG_FILE}" | tail -1 | cut -d= -f2- || true)"
 OPENCLAW_CONFIG_VAL="$(grep -E '^OPENCLAW_CONFIG_PATH=' "${CONFIG_FILE}" | tail -1 | cut -d= -f2- || true)"
+TARGETS_VAL="$(grep -E '^TARGETS=' "${CONFIG_FILE}" | tail -1 | cut -d= -f2- || true)"
+TARGETS_VAL="${TARGETS_VAL:-openclaw}"
+NEEDS_OPENCLAW=0
+case ",${TARGETS_VAL// /}," in *,openclaw,*) NEEDS_OPENCLAW=1 ;; esac
 
 echo
 if [ "$SKIP_TEST_FIRE" = "1" ]; then
@@ -232,9 +239,9 @@ if [ "$SKIP_TEST_FIRE" = "1" ]; then
     echo "their schedule. If a macOS permission dialog appears while you are"
     echo "away from the Mac and you click 'Don't Allow' from habit, Mechanic"
     echo "will silently break; re-grant via System Settings -> Privacy & Security."
-elif [ -z "$OPENCLAW_BIN_VAL" ] || [ -z "$OPENCLAW_CONFIG_VAL" ]; then
-    echo "Skipping test-fire: OPENCLAW_BIN_PATH or OPENCLAW_CONFIG_PATH is"
-    echo "still empty in:"
+elif [ "$NEEDS_OPENCLAW" = "1" ] && { [ -z "$OPENCLAW_BIN_VAL" ] || [ -z "$OPENCLAW_CONFIG_VAL" ]; }; then
+    echo "Skipping test-fire: openclaw is in TARGETS but OPENCLAW_BIN_PATH or"
+    echo "OPENCLAW_CONFIG_PATH is still empty in:"
     echo "  ${CONFIG_FILE}"
     echo
     echo "After you edit those values, run:"
@@ -256,8 +263,8 @@ else
     echo "appears while you are still here."
     echo
     echo "Total time: ~6 to 10 minutes (the updater test-fire snapshots"
-    echo "your OpenClaw config and runs doctor, but skips the actual"
-    echo "openclaw update step)."
+    echo "each target's data and runs its doctor, but skips the actual"
+    echo "update step)."
     echo
 
     echo "1/2: mechanic-supervisor (heartbeat + update check, ~5 sec)..."
@@ -292,8 +299,9 @@ echo
 echo "Install complete."
 echo
 echo "Next steps:"
-echo "  1. Edit ${CONFIG_FILE} so OPENCLAW_BIN_PATH and OPENCLAW_CONFIG_PATH point at your OpenClaw install."
-echo "  2. Run \`mechanic status\` to confirm Mechanic sees OpenClaw."
+echo "  1. Edit ${CONFIG_FILE}: set TARGETS (openclaw, hermes, or both) and the paths for each."
+echo "  2. Run \`mechanic status\` to confirm Mechanic sees your targets, then \`mechanic plan\`"
+echo "     to see what the first nightly would do."
 echo "  3. Run \`mechanic-supervisor\` once and then \`mechanic-updater --test-fire\` once."
 echo "     These surface any first-run macOS permission prompts while you are at the keyboard."
 echo "     The updater test-fire takes about 6 minutes (snapshots OpenClaw, runs doctor, verifies,"

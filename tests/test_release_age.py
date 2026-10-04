@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from mechanic.config import Config, NotifierSettings
+from mechanic.config import Config, NotifierSettings, OpenClawSettings
 from mechanic.release_age import (
     RegistrySnapshot,
     UpdatePlan,
@@ -76,10 +76,16 @@ assert SNAPSHOT is not None
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
 
 
-def make_config(min_age_days: int = 7) -> Config:
+def make_config(min_age_days: int = 7, skip: tuple[str, ...] = ()) -> Config:
     return Config(
-        openclaw_bin_path=Path("/fake/openclaw"),
-        openclaw_config_path=Path("/fake/.openclaw"),
+        targets=("openclaw",),
+        openclaw=OpenClawSettings(
+            bin_path=Path("/fake/openclaw"),
+            config_path=Path("/fake/.openclaw"),
+            min_update_age_days=min_age_days,
+            skip_versions=skip,
+        ),
+        hermes=None,
         update_time="02:00",
         min_update_age_days=min_age_days,
         supervisor_interval_minutes=240,
@@ -159,6 +165,7 @@ class StableChannelPlanTests(unittest.TestCase):
             availability=available(),
             now=now,
             snapshot=SNAPSHOT,
+            deprecation_check=lambda version: None,
         )
 
     def test_installs_newest_release_old_enough_with_tag(self) -> None:
@@ -244,6 +251,7 @@ class StableChannelPlanTests(unittest.TestCase):
                 installed_version="2026.8.2",
                 availability=available(),
                 now=NOW,
+                deprecation_check=lambda version: None,
             )
         self.assertFalse(plan.install)
         self.assertEqual(plan.error, "npm not found next to /fake/openclaw or on PATH")
@@ -256,7 +264,7 @@ class OtherChannelPlanTests(unittest.TestCase):
         avail = available(latest="2026.6.35", channel="extended-stable")
         waiting = plan_update(
             make_config(), installed_version="2026.6.30", availability=avail,
-            now=NOW, snapshot=SNAPSHOT,
+            now=NOW, snapshot=SNAPSHOT, deprecation_check=lambda v: None,
         )
         self.assertFalse(waiting.install)
         self.assertIsNone(waiting.error)
@@ -267,6 +275,7 @@ class OtherChannelPlanTests(unittest.TestCase):
         later = plan_update(
             make_config(), installed_version="2026.6.30", availability=avail,
             now=datetime(2026, 9, 18, 7, tzinfo=timezone.utc), snapshot=SNAPSHOT,
+            deprecation_check=lambda v: None,
         )
         self.assertTrue(later.install)
         self.assertEqual(later.target_version, "2026.6.35")
@@ -276,7 +285,7 @@ class OtherChannelPlanTests(unittest.TestCase):
         avail = available(latest="2026.9.1-beta.1", channel="beta")
         plan = plan_update(
             make_config(), installed_version="2026.8.1", availability=avail,
-            now=NOW, snapshot=SNAPSHOT,
+            now=NOW, snapshot=SNAPSHOT, deprecation_check=lambda v: None,
         )
         self.assertTrue(plan.install)
         self.assertEqual(plan.target_version, "2026.9.1-beta.1")
@@ -286,7 +295,7 @@ class OtherChannelPlanTests(unittest.TestCase):
         avail = available(latest="2026.9.99", channel="beta")
         plan = plan_update(
             make_config(), installed_version="2026.8.1", availability=avail,
-            now=NOW, snapshot=SNAPSHOT,
+            now=NOW, snapshot=SNAPSHOT, deprecation_check=lambda v: None,
         )
         self.assertFalse(plan.install)
         self.assertEqual(plan.error, "version not on registry")

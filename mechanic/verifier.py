@@ -75,32 +75,50 @@ def verify_openclaw(
 ) -> VerifyResult:
     """Probe OpenClaw and return whether it is currently responsive.
 
+    Thin wrapper over verify_binary for the OpenClaw target; kept so the
+    existing call sites and docs stay true.
+    """
+    return verify_binary(
+        config.openclaw_bin_path,
+        label="OpenClaw",
+        timeout_seconds=timeout_seconds,
+        probe_args=probe_args,
+    )
+
+
+def verify_binary(
+    bin_path: Path,
+    *,
+    label: str = "binary",
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    probe_args: Sequence[str] = _PROBE_ARGS,
+) -> VerifyResult:
+    """Probe a target's executable and return whether it is responsive.
+
     Args:
-        config: Loaded Mechanic configuration. `openclaw_bin_path` is the
-            executable that gets invoked.
+        bin_path: The executable that gets invoked.
+        label: Product name for messages (OpenClaw, Hermes).
         timeout_seconds: How long to wait before declaring the probe stuck.
         probe_args: The arguments to pass after the binary. Defaults to
             ('--version',), which is non-destructive and well-defined on
             most CLIs.
 
     Returns:
-        A VerifyResult. `healthy` is True only if the binary existed,
-        exited 0 within the timeout, and (when the probe was --version)
-        emitted something we recognise as a version string.
+        A VerifyResult. `healthy` is True only if the binary existed and
+        exited 0 within the timeout. `version` is whatever version-shaped
+        token the output carried, or None.
     """
-    bin_path = config.openclaw_bin_path
-
     if not bin_path.exists():
         return _result(
             healthy=False,
-            reason=f"OpenClaw binary not found at {bin_path}",
+            reason=f"{label} binary not found at {bin_path}",
             exit_code=None,
             duration_ms=0,
         )
     if not bin_path.is_file():
         return _result(
             healthy=False,
-            reason=f"OpenClaw binary at {bin_path} is not a regular file",
+            reason=f"{label} binary at {bin_path} is not a regular file",
             exit_code=None,
             duration_ms=0,
         )
@@ -178,6 +196,11 @@ class UpdateAvailability:
 
 
 def check_for_updates(config: Config) -> UpdateAvailability:
+    """Run `openclaw update status --json` for the configured OpenClaw."""
+    return check_openclaw_updates(config.openclaw_bin_path)
+
+
+def check_openclaw_updates(bin_path: Path) -> UpdateAvailability:
     """Run `openclaw update status --json` and parse availability.
 
     Read-only probe; returns in milliseconds and never touches the install.
@@ -185,7 +208,7 @@ def check_for_updates(config: Config) -> UpdateAvailability:
     `error` field rather than raising, so both the heartbeat and the
     nightly gate can report them without crashing.
     """
-    cmd = [str(config.openclaw_bin_path), "update", "status", "--json"]
+    cmd = [str(bin_path), "update", "status", "--json"]
     try:
         proc = subprocess.run(
             cmd,

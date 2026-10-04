@@ -38,6 +38,121 @@ Be honest about half-finished work.
 
 ---
 
+## 2026-10-04 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.0, Hermes Agent as a second target
+
+### What we did
+- Mechanic is multi-target. `TARGETS=openclaw|hermes|openclaw,hermes`
+  (default openclaw, so a v0.1 .env keeps working). `targets.py` holds the
+  two adapters; updater, supervisor, reporter, and CLI are product-agnostic
+  and loop over targets. Per-target snapshot stores (OpenClaw keeps the
+  v0.1 layout; Hermes under `snapshots/hermes/`), per-target state files,
+  failure counters, and pause. One morning report with a block per target.
+- Hermes support (`hermes_release.py`), mode `release-tag` by default:
+  `git ls-remote` for upstream tags, mirrored into Mechanic's own ref
+  namespace; a ledger (`hermes_tags.json`) that ages tags from MECHANIC's
+  first sight (git tag dates can be backdated) with one-time trust of tag
+  dates on the bootstrap scan; moved tags refused forever; `HERMES_SKIP_TAGS`
+  blocklist; the newest eligible tag is installed only when HEAD is its
+  git ancestor (never downgrade, leave a diverged checkout alone). Install
+  is `git checkout --detach <tag>`, `hermes pm install` (Hermes's documented
+  repair command; does no git), `hermes doctor --fix` (safe config
+  migrations), then `hermes gateway restart` only if a gateway was running
+  and not operator-disabled, in that order, as `hermes update` itself
+  orders things. `hermes pm install` failure puts the checkout back and
+  rebuilds for it. Verify adds HEAD == expected commit, `hermes pm status`,
+  `hermes gateway status`. `hermes backup --quick` runs before Mechanic's
+  tar so a SQLite-safe state copy rides inside the archive. Mode
+  `hermes-update` instead waits the same period then runs `hermes update
+  --yes [--channel X]` (a trigger delay; Hermes cannot pin).
+- The operator off switch for the Clawgustus incident: a target whose
+  gateway is `launchctl disable`d is skipped entirely (no CLI call) by the
+  supervisor, the updater, `plan`, and `restore`; `daemon.start` refuses
+  to start a disabled service. Plus, a product not in TARGETS is never
+  constructed.
+- OpenClaw planner: versions npm marks deprecated are skipped (one
+  `npm view openclaw@<v> deprecated` per examined candidate), and
+  `OPENCLAW_SKIP_VERSIONS` is the operator blocklist; both fall through to
+  the next eligible version. `version_key` now ignores a leading `v`.
+- `restore_snapshot` keeps a store's excluded top-level entries in place
+  (OpenClaw's tmp/ and logs/; Hermes's checkout and PM stores). Without
+  this the first simulated Hermes restore deleted the checkout.
+- New `mechanic plan [--target]`: per-target dry run of tonight's decision,
+  the thing to read before the first supervised nightly. `--target` on
+  run-now, resume, restore, capture-first-good (optional with one target).
+  `mechanic status` shows every target, gateway state including DISABLED,
+  and per-target failure state.
+- Tests: 59 (22 OpenClaw planner, 20 Hermes on real temporary git repos,
+  config/daemon/gates, reporter, rollback). Simulated two-target nightly
+  with fake openclaw/npm/hermes/launchctl and a real git origin: first
+  night installed OpenClaw 2026.9.6 via `--tag` and pinned Hermes to
+  v2026.9.21; second night both waited; disabled OpenClaw gateway ->
+  SKIPPED with zero openclaw invocations and the heartbeat says so;
+  `mechanic restore --target hermes last-known-good` restored data, kept
+  the checkout and stores, re-pinned the code, restarted the gateway;
+  legacy OpenClaw-only .env unchanged in behaviour.
+- Version 0.2.0. README (Hermes section, targets, commands, three Hermes
+  troubleshooting entries, the "I shut a gateway down" entry), AGENTS.md
+  (architecture, Hermes facts, the probe-restarts-gateway scar, the tag
+  date rule, the restore rule), .env.example, install.sh text.
+
+### Current state
+Code complete, unit-tested, and simulated. NOT run against a live Hermes
+or a live OpenClaw. Assumed, not confirmed: Randy's Hermes on the Mac mini
+is a source install (checkout at ~/.hermes/hermes-agent, launcher at
+~/.local/bin/hermes). A Desktop bundle has no checkout and cannot be
+pinned; `mechanic status` will say so on the "source checkout" line.
+Unverified on a real Mac: that `hermes pm install` after a bare checkout
+leaves the launcher and the launchd plist pointing at a working
+environment generation; that `hermes --version` reports the tag after a
+detached checkout; whether the install checkout is a partial clone (the
+tag fetch then lazily pulls blobs). The 2026-09-12 OpenClaw caveats
+(`--tag` path, channel key) still stand. To take Clawgustus offline now:
+`TARGETS=hermes` in the .env (or `launchctl disable` before `bootout`).
+
+### Decisions made
+- Pin Hermes via git + `hermes pm install` rather than only trigger-delay
+  `hermes update --yes` (rejected as the default: it installs the tip of
+  main, so the week buys nothing against the code itself). Both modes
+  ship; release-tag is the default.
+- Age from first sight, not tag date; tags mirrored into
+  `refs/mechanic/upstream-tags/` rather than `refs/tags/` (rejected:
+  writing Hermes's own tag namespace, and the "would clobber" dance).
+- Ancestry, not version strings, decides upgrade/current/ahead/diverged
+  for Hermes; version order only ranks candidates.
+- Gateway restart after doctor, not before (Hermes's own order).
+- `hermes doctor --fix` kept in the unattended path (`HERMES_DOCTOR_FIX`
+  turns it off) because it is the only unattended route to config
+  migration; its side effects are listed in .env.example.
+- Did not add a first-seen ledger for OpenClaw: npm's `time` map is
+  server-side, so the registry date is sound there.
+- Did not rename the repository or the console scripts; "Mechanic for
+  OpenClaw" stays the name, Hermes is documented as a second target.
+
+### Open questions
+- Does `hermes pm install` after `git checkout --detach` republish the
+  launcher / plist for a new Python generation, or is `hermes gateway
+  restart` enough? If not, `_update_takeover.publish_launchers` is the
+  internal that does it; find its CLI surface.
+- Is Randy's Hermes a source install, and which channel/version is it on?
+- When Nous publishes the stable channel record, should release-tag mode
+  switch to pinning the stable head instead of date tags?
+
+### Next session should
+1. On the Mac mini, with Randy watching: set `TARGETS=hermes` (plus
+   openclaw if wanted), `pip install --require-hashes -r requirements.txt`
+   and `pip install --no-build-isolation --no-deps -e .` in the venv,
+   `mechanic status`, `mechanic plan`, `hermes backup`, then
+   `mechanic run-now --target hermes`. Confirm the pin, `hermes --version`,
+   `hermes gateway status`, and the report; capture the real
+   `hermes --version` and `hermes pm status` output for the test fixtures.
+2. Merge to main once the supervised run passes, then disable Clawgustus
+   with `launchctl disable` + `bootout` and confirm the next heartbeat
+   reports it as operator-disabled.
+3. Run `scripts/deps/relock.sh` for the idna/urllib3 bumps noted on
+   2026-10-04 and record the moved versions.
+
+---
+
 ## 2026-10-04 (UTC) - branch: main - v0.1.4 merged to main
 
 ### What we did

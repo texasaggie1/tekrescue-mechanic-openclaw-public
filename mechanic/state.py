@@ -7,9 +7,12 @@ every updater and supervisor invocation and written atomically
 (write-to-tempfile-then-rename) so concurrent launchd processes never see a
 half-written file.
 
-The on-disk format is a single JSON object at
-~/Library/Application Support/tekrescue-mechanic/state/supervisor_state.json.
-See CLAUDE.md section 5 for the schema and the lifecycle rules.
+The on-disk format is a single JSON object per target. OpenClaw keeps the
+original path, ~/Library/Application Support/tekrescue-mechanic/state/
+supervisor_state.json, so existing installs carry their history forward;
+every other target uses supervisor_state.<target>.json next to it. Pause
+and the failure counter are per target: a Hermes bad night never stops the
+OpenClaw nightly, and the other way round.
 """
 
 from __future__ import annotations
@@ -27,6 +30,13 @@ from .config import RUNTIME_STATE_DIR
 
 
 STATE_FILE = RUNTIME_STATE_DIR / "supervisor_state.json"
+
+
+def state_path_for(target: str) -> Path:
+    """The state file for a target. OpenClaw keeps the pre-v0.2 path."""
+    if target == "openclaw":
+        return STATE_FILE
+    return RUNTIME_STATE_DIR / f"supervisor_state.{target}.json"
 
 _LOG = logging.getLogger(__name__)
 
@@ -59,14 +69,14 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load_state(path: Path | None = None) -> SupervisorState:
-    """Read the supervisor state file.
+def load_state(path: Path | None = None, *, target: str = "openclaw") -> SupervisorState:
+    """Read a target's supervisor state file.
 
     Returns a default SupervisorState if the file does not exist yet (first
     run). Raises StateError if the file exists but is unreadable or contains
-    a non-object payload.
+    a non-object payload. `path` overrides the location (tests).
     """
-    target = path or STATE_FILE
+    target = path or state_path_for(target)
     if not target.exists():
         return SupervisorState()
 
@@ -88,14 +98,16 @@ def load_state(path: Path | None = None) -> SupervisorState:
     return SupervisorState(**known)
 
 
-def save_state(state: SupervisorState, path: Path | None = None) -> None:
-    """Persist supervisor state atomically.
+def save_state(
+    state: SupervisorState, path: Path | None = None, *, target: str = "openclaw"
+) -> None:
+    """Persist a target's supervisor state atomically.
 
     Writes to a temporary file in the same directory, then renames over the
     destination. os.replace is atomic on POSIX, so a concurrent reader sees
     either the previous contents or the new contents, never a partial write.
     """
-    target = path or STATE_FILE
+    target = path or state_path_for(target)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     payload = json.dumps(asdict(state), indent=2, sort_keys=True) + "\n"

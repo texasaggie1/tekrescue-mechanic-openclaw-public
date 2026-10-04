@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tekrescue-mechanic"
-version = "0.1.4"
-description = "macOS supervisor that auto-heals OpenClaw after broken updates."
+version = "0.2.0"
+description = "macOS supervisor that keeps OpenClaw and Hermes Agent updated a week behind the edge, with backups and a circuit breaker."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Randy Bryan, tekRESCUE LLC" },
 ]
-keywords = ["openclaw", "macos", "supervisor", "launchd", "automation"]
+keywords = ["openclaw", "hermes-agent", "macos", "supervisor", "launchd", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

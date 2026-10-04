@@ -8,6 +8,8 @@ OpenClaw is an extremely useful product, but it seems to break every time we upd
 
 **Mechanic also refuses to be first.** A new OpenClaw release has to sit on the npm registry for a week before Mechanic will install it, so a poisoned release (a bad commit on main, a hijacked publish token) has time to be noticed and pulled by the people who watch these things for a living. Mechanic's own Python dependencies are locked under the same rule. See [The one-week waiting period](#the-one-week-waiting-period).
 
+**Since v0.2.0 Mechanic looks after [Hermes Agent](https://hermes-agent.nousresearch.com/) too.** Set `TARGETS=openclaw`, `TARGETS=hermes`, or both. Hermes gets the same treatment: a backup, a pin to the newest release that is a week old, its own doctor, a gateway restart, a verify, and a line in the morning report. See [Hermes](#hermes).
+
 ## What you'll get every morning
 
 Mechanic sends one DM to your chat channel after the 02:00 routine
@@ -113,10 +115,10 @@ Mechanic schedules nightly maintenance against OpenClaw. It runs
 the result, and tells you exactly how to roll back if something looks
 wrong.
 
-The blast radius is small but real. **Back up `~/.openclaw` before you
-run install.sh the first time.** Mechanic does not take that first
-backup for you; it snapshots before every nightly run after that, but
-the first install is a cliff.
+The blast radius is small but real. **Back up `~/.openclaw` (and run
+`hermes backup` if you use Hermes) before you run install.sh the first
+time.** Mechanic does not take that first backup for you; it snapshots
+before every nightly run after that, but the first install is a cliff.
 
 The fastest way to back up:
 
@@ -165,9 +167,12 @@ up `~/.openclaw`, writes the two LaunchAgent plists, loads them, then
 foreground-test-fires both so any macOS permission dialog appears
 while you're at the keyboard.
 
-After it finishes, edit `~/.config/tekrescue-mechanic/.env` to point
-`OPENCLAW_BIN_PATH` and `OPENCLAW_CONFIG_PATH` at your install, then
-run `mechanic status` to confirm everything's wired up.
+After it finishes, edit `~/.config/tekrescue-mechanic/.env`: set
+`TARGETS` to what you run (`openclaw`, `hermes`, or `openclaw,hermes`),
+point `OPENCLAW_BIN_PATH` and `OPENCLAW_CONFIG_PATH` at your OpenClaw
+install if it is listed, and check the Hermes defaults if Hermes is.
+Then run `mechanic status` to confirm everything's wired up and
+`mechanic plan` to see exactly what the first nightly would do.
 
 If you're driving the install via Claude Code or a similar assistant,
 just point it at this repo. It can read the rest of this README and
@@ -180,19 +185,41 @@ Everything is environment variables, loaded from
 install. Edit it with any text editor; the supervisor and updater pick
 up changes on their next scheduled invocation.
 
-### Required
+### Targets
+
+| Variable | Default | Description |
+|---|---|---|
+| `TARGETS` | `openclaw` | Which products Mechanic looks after: `openclaw`, `hermes`, or `openclaw,hermes`. A product not listed is never touched, not even probed. |
+
+### OpenClaw (required when `openclaw` is in `TARGETS`)
 
 | Variable | Description |
 |---|---|
 | `OPENCLAW_BIN_PATH` | Absolute path to the `openclaw` executable. Find yours with `which openclaw`. |
 | `OPENCLAW_CONFIG_PATH` | Absolute path to OpenClaw's config directory (the one you back up). Usually `~/.openclaw`. |
+| `OPENCLAW_MIN_UPDATE_AGE_DAYS` | Optional. Overrides `MIN_UPDATE_AGE_DAYS` for OpenClaw only. |
+| `OPENCLAW_SKIP_VERSIONS` | Optional. Comma-separated versions Mechanic must never install. Versions npm marks deprecated are skipped on their own. |
+
+### Hermes (used when `hermes` is in `TARGETS`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `HERMES_BIN_PATH` | `~/.local/bin/hermes` | The `hermes` launcher. |
+| `HERMES_HOME` | `~/.hermes` | Hermes's data directory (config, state, skills, sessions). Mechanic snapshots it. |
+| `HERMES_SOURCE_DIR` | `~/.hermes/hermes-agent` | The git checkout a source install runs from. A Desktop bundle has none and cannot be pinned. |
+| `HERMES_UPDATE_MODE` | `release-tag` | `release-tag` pins the checkout to a week-old release and rebuilds with `hermes pm install`. `hermes-update` waits the same period, then runs `hermes update --yes`, which installs the tip of the channel. |
+| `HERMES_UPDATE_CHANNEL` | empty | `hermes-update` mode only: `--channel` to pass (`stable`, `canary`, `main`). |
+| `HERMES_MIN_UPDATE_AGE_DAYS` | `MIN_UPDATE_AGE_DAYS` | Overrides the shared waiting period for Hermes only. |
+| `HERMES_SKIP_TAGS` | empty | Comma-separated release tags Mechanic must never pin to. |
+| `HERMES_DOCTOR_FIX` | `true` | Run `hermes doctor --fix` after an update (safe config migrations, unattended). `false` runs read-only `hermes doctor`. |
+| `HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS` | `2400` | How long `hermes gateway restart` may take; Hermes drains in-flight work first, up to 30 minutes by default. |
 
 ### Optional, with defaults
 
 | Variable | Default | Description |
 |---|---|---|
 | `UPDATE_TIME` | `02:00` | Local time the nightly routine fires. 24-hour. |
-| `MIN_UPDATE_AGE_DAYS` | `7` | A release must have been public on the npm registry this many days before Mechanic installs it. Mechanic installs the newest release that is old enough (via `openclaw update --tag`), so it trails OpenClaw by about this long. `0` turns the wait off. Needs `npm` next to `openclaw` or on PATH. |
+| `MIN_UPDATE_AGE_DAYS` | `7` | The waiting period for every target. OpenClaw: a release must have been public on npm this long, and Mechanic installs the newest one that is (via `openclaw update --tag`). Hermes: a release tag must have been in Mechanic's sight this long. `0` turns the wait off. Per-target overrides above. |
 | `SUPERVISOR_INTERVAL_MINUTES` | `240` | Heartbeat cadence, in minutes. 240 = 6 pings/day. |
 | `SNAPSHOT_RETENTION_DAYS` | `14` | Rolling nightly snapshots kept under `snapshots/nightly/`. Sticky snapshots (`first-known-good`, `last-known-good`) are never pruned. |
 | `MIN_FREE_DISK_MB_FOR_SNAPSHOT` | `500` | Free disk floor for a run. If the snapshot volume is short, Mechanic first deletes its own oldest nightly snapshots to make room (never the first or last known good, and always keeping the 3 newest), and only refuses to start if that is still not enough. |
@@ -269,23 +296,83 @@ pins against PyPI's upload dates any time you like.
 To wait longer, raise `MIN_UPDATE_AGE_DAYS`. To go back to installing
 the newest release the night it lands, set it to `0`.
 
+## Hermes
+
+[Hermes Agent](https://hermes-agent.nousresearch.com/) is a source
+install: a git checkout at `~/.hermes/hermes-agent` that tracks `main`,
+with your data in `~/.hermes`. Its own updater, `hermes update`,
+fast-forwards to the tip of `main` and has no way to ask for an older
+release. The maintainers do mark releases, though: plain tags such as
+`v2026.9.24` land on `main` every few days, carry the date that
+`hermes --version` prints, and run the project's release-gate tests.
+
+So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
+
+1. Asks origin for its tags (`git ls-remote`) and mirrors them into a
+   namespace of its own inside the checkout. Hermes's own tags are never
+   written by Mechanic.
+2. Records in a ledger when **Mechanic** first saw each tag and which
+   commit it pointed at. Age is counted from first sight, not from the
+   tag's own date, because git tag dates are typed by whoever runs
+   `git tag` and a hijacked account could backdate one straight past the
+   waiting period. The very first scan on a fresh install trusts the
+   tags' dates once, so you do not wait a week for a release that is
+   months old; `mechanic plan` shows you what that scan concluded.
+3. Refuses any tag whose commit has changed since first sight. Tags are
+   supposed to be immutable; a moved one is treated as hostile and named
+   in every report until you deal with it.
+4. Picks the newest eligible tag and compares it with your checkout by
+   git ancestry. It installs only if your commit is an ancestor of the
+   tag. Already there means "current". Ahead of it (someone ran
+   `hermes update`, or the checkout sits on `main`'s tip) means "wait for
+   a newer tag to age"; Mechanic never downgrades. Anything else means
+   "diverged, leaving it alone".
+5. Runs `hermes backup --quick`, takes its own archive of `~/.hermes`
+   (minus the checkout, the package manager's stores, caches, and browser
+   profiles, the same list `hermes backup` skips), then `git checkout
+   --detach <tag>`, `hermes pm install` (Hermes's documented repair
+   command, the same code its updater runs), `hermes doctor --fix`,
+   and a gateway restart through launchd if one was running and you have
+   not disabled it. Verify checks `hermes --version`, that the checkout
+   landed on the expected commit, `hermes pm status`, and `hermes gateway
+   status`.
+
+If `hermes pm install` fails, the checkout goes back to the commit it
+was on and the environment is rebuilt for that, so a bad night never
+leaves Hermes half-moved. `mechanic restore --target hermes <snapshot>`
+puts both your data and the code back.
+
+`HERMES_UPDATE_MODE=hermes-update` keeps Hermes's own updater instead:
+the same waiting period on the newest tag, then `hermes update --yes`,
+which installs the tip of the configured channel. A trigger delay, not
+a pin, but every step is Hermes-supported. Nous has designed a `stable`
+channel that would make `--channel stable` a real pin; as of October
+2026 its published record does not exist yet, so leave
+`HERMES_UPDATE_CHANNEL` empty until it does.
+
+Two things to know. First, this is a path Nous does not test for you,
+so run the first nightly supervised: `mechanic plan`, then
+`mechanic run-now --target hermes` while you watch, with a fresh
+`hermes backup` in hand. Second, Hermes already quarantines its own
+Python dependencies for 14 days (`exclude-newer` in its lockfile), so on
+Hermes the application code is the only thing left to wait on, which is
+exactly what the pin covers.
+
 ## Verify it's working
 
 `mechanic status` prints a snapshot of the current install. Healthy
 output looks like this:
 
 ```
-tekRESCUE Mechanic for OpenClaw
-  version: 0.1.4
+tekRESCUE Mechanic
+  version: 0.2.0
 
 Configuration:
   file:                /Users/you/.config/tekrescue-mechanic/.env (ok)
-  openclaw bin:        /opt/homebrew/bin/openclaw (ok)
-  openclaw config:     /Users/you/.openclaw (ok)
+  targets:             openclaw, hermes
   update time:         02:00 local
-  min update age:      7 days (npm: /opt/homebrew/bin/npm)
+  min update age:      7 days (default for every target)
   supervisor interval: 240 min
-  prompt mode:         STRICT
   snapshot retention:  14 days
   min free disk:       500 MB
   max failures:        3
@@ -293,34 +380,68 @@ Configuration:
   log level:           INFO
   notifier:            telegram
 
+OpenClaw:
+  openclaw bin:        /opt/homebrew/bin/openclaw (ok)
+  openclaw config:     /Users/you/.openclaw (ok)
+  min update age:      7 days (npm: /opt/homebrew/bin/npm)
+  prompt mode:         STRICT
+  gateway:             ai.openclaw.gateway loaded
+  state:               0 consecutive failures, last success 2026-10-04T07:09:41+00:00
+
+Hermes:
+  hermes bin:          /Users/you/.local/bin/hermes (ok)
+  hermes home:         /Users/you/.hermes (ok)
+  source checkout:     /Users/you/.hermes/hermes-agent (ok)
+  update mode:         release-tag
+  min update age:      7 days
+  doctor --fix:        yes
+  gateway:             ai.hermes.gateway loaded
+  state:               0 consecutive failures
+
 Launchd:
   supervisor agent:    loaded
   updater agent:       loaded
 
 Snapshots:
-  latest: /Users/you/Library/Application Support/tekrescue-mechanic/snapshots/last-known-good
+  openclaw:  /Users/you/Library/Application Support/tekrescue-mechanic/snapshots/last-known-good
+  hermes:    /Users/you/Library/Application Support/tekrescue-mechanic/snapshots/hermes/last-known-good
 
 Recent log (~/Library/Logs/tekrescue-mechanic/mechanic.log):
   ...
 ```
 
-The three `(ok)` markers next to file paths are the load-bearing ones.
-If any of them says `missing`, edit `~/.config/tekrescue-mechanic/.env`
-and re-run `mechanic status`. The `min update age` line should name an
-`npm`; if it says `npm NOT found`, the waiting period cannot read
+The `(ok)` markers next to file paths are the load-bearing ones. If any
+of them says `missing`, edit `~/.config/tekrescue-mechanic/.env` and
+re-run `mechanic status`. OpenClaw's `min update age` line should name
+an `npm`; if it says `npm NOT found`, the waiting period cannot read
 publish dates and no update will install until it can (see
-Troubleshooting).
+Troubleshooting). A gateway line that says `DISABLED by operator` means
+you switched that product off with `launchctl disable` and Mechanic is
+leaving it alone.
+
+Then run `mechanic plan`. It prints, per target, what tonight's run
+would do and why, without changing anything:
+
+```
+== Hermes ==
+  health:   healthy (2026.9.7, exit 0, 11 ms)
+  Waiting period (HERMES_MIN_UPDATE_AGE_DAYS=7, mode release-tag): v2026.9.21 (first seen 2026-09-21, 13 days ago) is the newest release old enough and newer than the installed v2026.9.7; pinning the checkout to it. Next: v2026.10.3 becomes eligible 2026-10-10T10:05Z.
+  Tonight: snapshot, install v2026.9.21, doctor, verify.
+```
 
 Other useful commands:
 
 | Command | What it does |
 |---|---|
+| `mechanic plan [--target X]` | Show what tonight's run would do for each target, and why. Changes nothing. |
 | `mechanic logs -n 200` | Print the last 200 log lines. Add `-f` to follow live. |
 | `mechanic test-notifier` | Send a test message through your configured notifier. |
-| `mechanic run-now` | Run the full nightly routine immediately (takes ~6 to 10 min). |
-| `mechanic capture-first-good` | Snapshot OpenClaw as the pristine pre-Mechanic baseline (refuses if OpenClaw is currently unhealthy). |
-| `mechanic restore <target>` | Roll OpenClaw back to a snapshot. Target is `first-known-good`, `last-known-good`, or a nightly id from the log. Stops the gateway, untars, restarts. |
-| `mechanic resume` | Clear paused state and reset the failure counter. |
+| `mechanic run-now [--target X]` | Run the full nightly routine immediately (takes ~6 to 10 min per target). |
+| `mechanic capture-first-good --target X` | Snapshot a target as the pristine pre-Mechanic baseline (refuses if it is currently unhealthy). |
+| `mechanic restore --target X <snapshot>` | Roll a target back to a snapshot: `first-known-good`, `last-known-good`, or a nightly id from the log. Stops the gateway, untars, puts Hermes's code back too, restarts. |
+| `mechanic resume --target X` | Clear a target's paused state and reset its failure counter. |
+
+With a single target configured, `--target` can be left off.
 
 ## Notifications (optional)
 
@@ -523,6 +644,44 @@ updates flowing again, and please open an issue with the output of
 `openclaw update status --json` (minus anything private) so we can fix
 the detection.
 
+### I shut a gateway down and Mechanic brought it back
+
+OpenClaw's CLI starts its own gateway when anything probes it, including
+Mechanic's read-only heartbeat (`openclaw --version`, `openclaw update
+status --json`). A plain `launchctl bootout` therefore lasts until the
+next supervisor tick. To keep a product down:
+
+1. `launchctl disable gui/$(id -u)/ai.openclaw.gateway` (or
+   `ai.hermes.gateway`), then `launchctl bootout` it. Mechanic reads the
+   disabled flag and does not run that product's CLI at all; `mechanic
+   status` shows `DISABLED by operator` and the heartbeat says so.
+2. Or remove the product from `TARGETS`. Mechanic then never constructs
+   it.
+
+Do both if you want belt and braces. `launchctl enable` and a `TARGETS`
+edit bring it back.
+
+### Hermes: "already ahead of vX, Mechanic never downgrades"
+
+Someone ran `hermes update` (or Hermes ran `/update` from chat), so the
+checkout is on the tip of `main`, past every week-old tag. Mechanic
+leaves it there and waits for the next tag to age. If you want back on
+a pinned release now, `mechanic restore --target hermes last-known-good`
+puts the code (and data) back where Mechanic last verified it.
+
+### Hermes: "on different lines of history"
+
+The checkout is on a branch no release tag descends from (a local
+feature branch, a fork). Mechanic will not guess. Put it back on `main`
+or on a release tag and the next nightly resumes.
+
+### Hermes: `hermes pm install` failed
+
+The report shows the checkout went back to its previous commit and the
+environment was rebuilt for it, so Hermes is where it was. Run
+`hermes pm status` and `hermes doctor` to see what the rebuild objected
+to; the Hermes log at `~/.hermes/logs/` has the detail.
+
 ### Update fails with "unexpected packaged dist file dist/openclaw-install-guard"
 
 You're on npm 12, which blocks package install scripts unless the
@@ -567,12 +726,14 @@ or agent: the whole point is that it keeps working when OpenClaw is
 broken, so it shares no dependencies, configs, or runtime with
 OpenClaw.
 
-Two LaunchAgents do the work:
+Two LaunchAgents do the work, once per target in `TARGETS`:
 
-- **Supervisor** fires every 4 hours. Probes OpenClaw with
-  `openclaw --version`, asks `openclaw update status --json` whether
-  an update is available, and sends a heartbeat through your notifier.
-  Read-only; never mutates anything.
+- **Supervisor** fires every 4 hours. Probes each product's health
+  (`openclaw --version`, `hermes --version`), works out what the nightly
+  would do, and sends a heartbeat through your notifier. It skips any
+  product whose gateway you have `launchctl disable`d, because OpenClaw
+  restarts its gateway when probed. Mechanic itself never mutates
+  anything from the heartbeat.
 - **Updater** fires once a night at 02:00 local. Snapshots
   `~/.openclaw` as a gzipped tar, checks whether a newer OpenClaw
   actually exists, works out the newest release that has been public
@@ -587,12 +748,15 @@ Two LaunchAgents do the work:
   auto-roll-back (rolling back requires stopping the live OpenClaw
   daemon; too risky for an unattended job). It tells you exactly which
   snapshot to restore from and waits for you to run the command.
+  For Hermes the same routine pins the git checkout to a week-old
+  release tag and rebuilds with `hermes pm install`; see [Hermes](#hermes).
 
 Snapshots live under
-`~/Library/Application Support/tekrescue-mechanic/snapshots/`. The
-sticky `first-known-good/` and `last-known-good/` are never auto-pruned;
-the rolling `nightly/` directory keeps the last
-`SNAPSHOT_RETENTION_DAYS` entries.
+`~/Library/Application Support/tekrescue-mechanic/snapshots/` (OpenClaw)
+and `snapshots/hermes/` (Hermes). The sticky `first-known-good/` and
+`last-known-good/` are never auto-pruned; the rolling `nightly/`
+directory keeps the last `SNAPSHOT_RETENTION_DAYS` entries. Failure
+counters and the pause switch are per target.
 
 ## Working on this with an AI assistant
 

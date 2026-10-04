@@ -12,8 +12,10 @@ what state the project is in.
 
 ## 1. What this project is
 
-tekRESCUE Mechanic is a supervisor agent that watches over OpenClaw on
-macOS. It runs two loops as launchd LaunchAgents:
+tekRESCUE Mechanic is a supervisor agent that watches over OpenClaw and,
+since v0.2.0, Hermes Agent on macOS. `TARGETS` in the .env says which
+(default openclaw). It runs two loops as launchd LaunchAgents, once per
+target each:
 
 - **Supervisor loop**: a heartbeat every `SUPERVISOR_INTERVAL_MINUTES`
   (default 240). Each tick probes OpenClaw health (`openclaw --version`),
@@ -21,14 +23,15 @@ macOS. It runs two loops as launchd LaunchAgents:
   the configured notifier. It always pings: a healthy heartbeat is
   informative, and a MISSING heartbeat tells the operator the supervisor
   itself stopped.
-- **Updater loop**: every night (default 02:00) it snapshots OpenClaw's
-  config, updates OpenClaw only if a newer version actually exists AND
-  that version has been public on the npm registry for at least
-  `MIN_UPDATE_AGE_DAYS` (default 7, the supply-chain waiting period;
-  see `mechanic/release_age.py`), runs
-  `openclaw doctor --fix --non-interactive`, re-applies the operator's
-  local patches via an optional hook, verifies OpenClaw still runs, and
-  writes a morning report.
+- **Updater loop**: every night (default 02:00) it snapshots the target's
+  data, installs the newest release that has aged `MIN_UPDATE_AGE_DAYS`
+  (default 7, the supply-chain waiting period), runs the product's
+  doctor, verifies it still runs, and writes a morning report. OpenClaw:
+  npm publish dates, `openclaw update --yes --tag <v>`, `openclaw doctor
+  --fix --non-interactive`, POST_UPDATE_HOOK (`release_age.py`). Hermes:
+  release tags and a first-sight ledger, `git checkout --detach <tag>`,
+  `hermes pm install`, `hermes doctor --fix`, launchd gateway restart
+  (`hermes_release.py`).
 
 The differentiator is that Mechanic knows when to stop. Three consecutive
 failed nights trips a circuit breaker: Mechanic pauses itself and waits
@@ -37,26 +40,30 @@ for a human (`mechanic resume`) instead of compounding the damage.
 ## 2. The one architectural rule you must not break
 
 Mechanic is a plain Python program with minimal dependencies. It is NOT an
-OpenClaw skill, agent, or extension, and it must never become one. The
-entire point is that Mechanic keeps working when OpenClaw is broken, so it
-cannot share OpenClaw's runtime, dependencies, or config. If you catch
-yourself thinking "this would be easier as an OpenClaw plugin," stop.
+OpenClaw skill, agent, or extension, and not a Hermes skill, plugin, or
+cron job either, and it must never become one. The entire point is that
+Mechanic keeps working when the product it supervises is broken, so it
+cannot share that product's runtime, dependencies, or config. If you
+catch yourself thinking "this would be easier as a plugin," stop.
 
 ## 3. Components
 
 | File | Job |
 |---|---|
-| `mechanic/supervisor.py` | heartbeat loop |
-| `mechanic/updater.py` | the nightly update routine |
+| `mechanic/supervisor.py` | heartbeat loop, per target |
+| `mechanic/updater.py` | the nightly update routine, per target |
+| `mechanic/targets.py` | the Target adapters (OpenClawTarget, HermesTarget): one interface the loops talk to |
 | `mechanic/doctor_runner.py` | runs `openclaw doctor --fix` |
-| `mechanic/rollback.py` | snapshots, restore, pruning, disk headroom |
-| `mechanic/verifier.py` | post-update health check (the authoritative signal) |
-| `mechanic/release_age.py` | the release waiting period: which version is old enough to install tonight |
-| `mechanic/state.py` | supervisor state file (failure count, pause flag) |
-| `mechanic/reporter.py` | formats the morning report |
+| `mechanic/rollback.py` | snapshots, restore, pruning, disk headroom; one SnapshotStore per target |
+| `mechanic/verifier.py` | health probe (the authoritative signal) and `openclaw update status` |
+| `mechanic/release_age.py` | OpenClaw's waiting period: which npm version is old enough tonight |
+| `mechanic/hermes_release.py` | Hermes's waiting period: tag ledger, ancestry check, pin, `hermes pm install`, gateway |
+| `mechanic/daemon.py` | launchd control for both gateways, plus the operator-disabled guard |
+| `mechanic/state.py` | supervisor state file per target (failure count, pause flag) |
+| `mechanic/reporter.py` | formats the morning report, one block per target |
 | `mechanic/notifier.py` | Telegram / Slack / webhook / email push |
-| `mechanic/config.py` | loads `.env`, validates settings |
-| `mechanic/cli.py` | `mechanic status`, `run-now`, `restore`, `resume`, etc. |
+| `mechanic/config.py` | loads `.env`, validates settings, TARGETS and per-target blocks |
+| `mechanic/cli.py` | `mechanic status`, `plan`, `run-now`, `restore`, `resume`, etc. |
 
 Also in the repo: `tests/` (stdlib `unittest`, run with
 `python3 -m unittest discover -s tests` from a venv that has
@@ -67,9 +74,11 @@ dependency set) and `scripts/deps/` (`relock.sh` regenerates it,
 Disk layout on an installed machine: logs in
 `~/Library/Logs/tekrescue-mechanic/`, snapshots in
 `~/Library/Application Support/tekrescue-mechanic/snapshots/`
-(`first-known-good/`, `last-known-good/`, `nightly/<timestamp>/`), config
-in `~/.config/tekrescue-mechanic/.env` (chmod 600), state in
-`~/Library/Application Support/tekrescue-mechanic/state/`.
+(`first-known-good/`, `last-known-good/`, `nightly/<timestamp>/`; Hermes
+under `snapshots/hermes/`), config in `~/.config/tekrescue-mechanic/.env`
+(chmod 600), state in `~/Library/Application Support/tekrescue-mechanic/state/`
+(`supervisor_state.json` for OpenClaw, `supervisor_state.hermes.json`,
+and `hermes_tags.json`, the tag ledger).
 
 ## 4. Hard-won production facts (do not relearn these)
 
@@ -127,6 +136,52 @@ in `~/.config/tekrescue-mechanic/.env` (chmod 600), state in
   version OpenClaw reports to age, and skips `--tag` on extended-stable
   and dev because OpenClaw refuses it there. Confirm the real key from a
   live install when you can and pin the extraction.
+- **A read-only OpenClaw probe restarts OpenClaw's gateway.** On
+  2026-10-03 the operator ran `launchctl bootout` on `ai.openclaw.gateway`
+  to take the agent offline. Four hours later, exactly one supervisor
+  interval, the gateway was back: the heartbeat's `openclaw --version`
+  and `openclaw update status --json` were enough for OpenClaw to
+  re-enable and start it. Two defences now exist and both must stay:
+  `TARGETS` (an unlisted product is never constructed, never probed), and
+  the `launchctl print-disabled` guard in `daemon.is_disabled`, which the
+  supervisor, the updater, `plan`, and `restore` all honour. Tell the
+  operator to `launchctl disable` before `bootout`; a bare bootout does
+  not survive the next tick.
+- **Hermes facts (read 2026-10-04 from the hermes-agent source).** A
+  source install is a git checkout at `~/.hermes/hermes-agent` tracking
+  `main`, launcher `~/.local/bin/hermes`, data in `~/.hermes`, gateway
+  LaunchAgent `ai.hermes.gateway` (`-<profile>` suffix for extra
+  profiles). `hermes update` has `--yes`, `--check`, `--plan`, `--backup`,
+  `--no-backup`, `--channel`, `--branch`, `--no-gateway-restart`, and NO
+  way to request an older release; it fast-forwards to the branch tip or
+  to a published channel's exact commit. The `stable` channel record
+  (`https://hermes-assets.nousresearch.com/releases/channels/stable.json`)
+  returned 404 on 2026-10-04, so `--channel stable` fails today. Release
+  tags are plain `vYYYY.M.D` (every 3 to 7 days); the updater's own
+  stable-tag rule excludes that shape, canary builds are `v0.21.x+canary.
+  <stamp>`. `hermes pm install` (bare) is the documented repair command:
+  tool closure, then venv sync from the checkout's lock; it does no git
+  operations, so a pinned checkout stays pinned. `hermes pm status` prints
+  the sync receipt as JSON. `hermes doctor --fix` applies safe config
+  migrations non-interactively, may install a macOS TCC helper, acquire a
+  missing tool through PM, and checkpoint SQLite WAL files; nothing in it
+  starts or enables the gateway. `hermes backup --quick` writes a
+  SQLite-safe state snapshot under `~/.hermes/state-snapshots/`. Hermes
+  quarantines its own Python dependencies with uv `exclude-newer = "14
+  days"`. `hermes --version` prints `Hermes Agent v<base>+<n>.g<sha>
+  (<release date>)` and may do a passive update check unless
+  `updates.check` is false.
+- **Git tag dates are not evidence.** They are written by whoever ran
+  `git tag`, so Mechanic ages a Hermes tag from the moment Mechanic first
+  saw it (`hermes_tags.json`), trusts tag dates only on the very first
+  scan, and treats a tag whose commit changed as hostile. Upstream tags
+  are mirrored into `refs/mechanic/upstream-tags/` so Hermes's own
+  `refs/tags/` is never written by Mechanic.
+- **A restore must not delete what the archive excludes.** Hermes's
+  archive leaves out the code checkout and the package manager's stores
+  (gigabytes, all regenerable, all essential); `restore_snapshot` moves
+  the excluded top-level entries back from the pre-restore copy. Found
+  in simulation on 2026-10-04, before it ever ran on a real machine.
 - **Subprocess hygiene**: every invocation of `openclaw` (or anything it
   spawns: npm, node, tar) must pass `env=clean_subprocess_env()` from
   `mechanic/config.py` and `stdin=subprocess.DEVNULL`. Mechanic and
@@ -205,6 +260,12 @@ YOU whenever you touch a live OpenClaw install, whatever model you are.
 - Address the user as "you" in docs and CLI output. Casual but precise
   tone. This is a free tool that should feel like a gift, not an
   enterprise manual.
+- Product-specific code lives in the Target adapter (`targets.py`) and
+  that product's release module. The updater, supervisor, reporter, and
+  CLI must stay product-agnostic: if you find yourself writing
+  `if target.name == "hermes"` in `updater.py`, it belongs in
+  `HermesTarget`. Everything a target can fail to establish resolves to
+  "leave the install alone" with the reason in the report.
 
 ## 7. The SESSIONS.md protocol (please steal this idea)
 
@@ -250,17 +311,19 @@ this file as part of the same commit.
 4. Anything user-facing (README copy, CLI output, error messages) is
    sensitive: propose wording, let the human approve it.
 5. Run the tests (`python3 -m unittest discover -s tests`) before every
-   push that touches `mechanic/`. If you changed `requirements.txt`, it
-   came from `scripts/deps/relock.sh` and `check_pin_age.py` passed.
+   push that touches `mechanic/`. The Hermes tests build real git repos
+   in a temp dir and need `git` and `tar`. If you changed
+   `requirements.txt`, it came from `scripts/deps/relock.sh` and
+   `check_pin_age.py` passed.
 6. Update SESSIONS.md (and this file, when permanent knowledge changed)
    before every push. The session is not over until the commits land.
 
-## 9. Out of scope (v0.1.x)
+## 9. Out of scope (v0.2.x)
 
 Linux/Windows support, a GUI, Mechanic auto-updating itself, telemetry,
-multi-user or system-level installs, OpenClaw forks, and any hosted
-version of Mechanic. Do not wander into these without the maintainer
-asking.
+multi-user or system-level installs, OpenClaw forks, Hermes Desktop
+bundles and Docker installs, and any hosted version of Mechanic. Do not
+wander into these without the maintainer asking.
 
 ---
 

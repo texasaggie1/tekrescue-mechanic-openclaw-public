@@ -4,6 +4,12 @@ Reads ~/.config/tekrescue-mechanic/.env, validates every value, applies the
 documented defaults, and returns a frozen Config dataclass. All other modules
 import Config from here. Path constants are exported so callers (install
 scripts, the CLI, tests) can reuse them without duplicating string literals.
+
+Since v0.2.0 Mechanic looks after one or more TARGETS (openclaw, hermes).
+Each target has its own settings block (`Config.openclaw`, `Config.hermes`),
+present only when that target is listed in TARGETS. A target that is not
+listed is never touched, not even probed; that is the operator's off switch
+for a product they have deliberately shut down.
 """
 
 from __future__ import annotations
@@ -29,6 +35,8 @@ RUNTIME_STATE_DIR = STATE_DIR / "state"
 VALID_PROMPT_MODES = ("STRICT", "ESCALATE", "AUTO_YES")
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VALID_NOTIFIERS = ("none", "telegram", "slack", "webhook", "email")
+VALID_TARGETS = ("openclaw", "hermes")
+VALID_HERMES_UPDATE_MODES = ("release-tag", "hermes-update")
 
 # Mechanic-internal env vars that must NOT leak into subprocesses invoking
 # OpenClaw. The OPENCLAW_CONFIG_PATH name in particular collides with
@@ -37,8 +45,20 @@ VALID_NOTIFIERS = ("none", "telegram", "slack", "webhook", "email")
 # in v0.1.1: leaking Mechanic's value caused `openclaw update` to emit
 # "config is invalid (EISDIR on <root> read)".
 _MECHANIC_ENV_VARS = (
+    "TARGETS",
     "OPENCLAW_BIN_PATH",
     "OPENCLAW_CONFIG_PATH",
+    "OPENCLAW_MIN_UPDATE_AGE_DAYS",
+    "OPENCLAW_SKIP_VERSIONS",
+    "HERMES_BIN_PATH",
+    "HERMES_HOME",
+    "HERMES_SOURCE_DIR",
+    "HERMES_UPDATE_MODE",
+    "HERMES_UPDATE_CHANNEL",
+    "HERMES_MIN_UPDATE_AGE_DAYS",
+    "HERMES_SKIP_TAGS",
+    "HERMES_DOCTOR_FIX",
+    "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS",
     "UPDATE_TIME",
     "MIN_UPDATE_AGE_DAYS",
     "SUPERVISOR_INTERVAL_MINUTES",
@@ -104,16 +124,53 @@ class NotifierSettings:
 
 
 @dataclass(frozen=True)
+class OpenClawSettings:
+    """Everything Mechanic needs to look after an OpenClaw install."""
+
+    bin_path: Path
+    config_path: Path
+    min_update_age_days: int
+    skip_versions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HermesSettings:
+    """Everything Mechanic needs to look after a Hermes Agent source install.
+
+    `update_mode` is `release-tag` (Mechanic pins the git checkout to the
+    newest release tag that has aged MIN_UPDATE_AGE_DAYS, then rebuilds the
+    environment with Hermes's own package manager) or `hermes-update`
+    (Mechanic waits for a tag to age, then runs `hermes update --yes`, which
+    installs the tip of the configured channel). See hermes_release.py.
+    """
+
+    bin_path: Path
+    home: Path
+    source_dir: Path
+    update_mode: str
+    update_channel: Optional[str]
+    min_update_age_days: int
+    skip_tags: tuple[str, ...] = ()
+    doctor_fix: bool = True
+    gateway_restart_timeout_seconds: int = 2400
+
+
+@dataclass(frozen=True)
 class Config:
     """Validated runtime configuration for Mechanic.
 
     Construct with load_config(). Treat this as an immutable snapshot of the
     .env file at process start. If the .env changes, the supervisor and
     updater pick it up on their next launchd-scheduled invocation.
+
+    `targets` lists the products Mechanic looks after, in the order the
+    nightly handles them. `openclaw` and `hermes` hold that target's
+    settings and are None when the target is not listed.
     """
 
-    openclaw_bin_path: Path
-    openclaw_config_path: Path
+    targets: tuple[str, ...]
+    openclaw: Optional[OpenClawSettings]
+    hermes: Optional[HermesSettings]
     update_time: str
     min_update_age_days: int
     supervisor_interval_minutes: int
@@ -126,6 +183,20 @@ class Config:
     post_update_hook_timeout_seconds: int
     log_level: str
     notifier: NotifierSettings
+
+    @property
+    def openclaw_bin_path(self) -> Path:
+        """OpenClaw's binary. Only valid when `openclaw` is a target."""
+        if self.openclaw is None:
+            raise ConfigError("openclaw is not in TARGETS")
+        return self.openclaw.bin_path
+
+    @property
+    def openclaw_config_path(self) -> Path:
+        """OpenClaw's config directory. Only valid when `openclaw` is a target."""
+        if self.openclaw is None:
+            raise ConfigError("openclaw is not in TARGETS")
+        return self.openclaw.config_path
 
     def secret_values(self) -> list[str]:
         """Return all secret strings that must be masked in log output."""
@@ -155,12 +226,7 @@ def load_config(env_file: Path | None = None) -> Config:
     if path.exists():
         load_dotenv(path, override=False)
 
-    bin_raw = _env("OPENCLAW_BIN_PATH")
-    cfg_raw = _env("OPENCLAW_CONFIG_PATH")
-    if not bin_raw:
-        raise ConfigError(f"OPENCLAW_BIN_PATH is required. Set it in {path}.")
-    if not cfg_raw:
-        raise ConfigError(f"OPENCLAW_CONFIG_PATH is required. Set it in {path}.")
+    targets = _parse_targets(_env("TARGETS"))
 
     update_time = _env("UPDATE_TIME") or "02:00"
     if not _is_valid_hhmm(update_time):
@@ -169,9 +235,11 @@ def load_config(env_file: Path | None = None) -> Config:
         )
 
     # Supply-chain waiting period (v0.1.4): a release must have been public
-    # on the npm registry for this many days before Mechanic installs it.
-    # 0 turns the wait off. See release_age.py for the reasoning.
+    # for this many days before Mechanic installs it. 0 turns the wait off.
+    # Per-target overrides below. See release_age.py and hermes_release.py.
     min_update_age = _env_int("MIN_UPDATE_AGE_DAYS", default=7, min_value=0)
+    openclaw = _load_openclaw(path, default_min_age=min_update_age) if "openclaw" in targets else None
+    hermes = _load_hermes(path, default_min_age=min_update_age) if "hermes" in targets else None
     interval = _env_int("SUPERVISOR_INTERVAL_MINUTES", default=240, min_value=1)
     retention = _env_int("SNAPSHOT_RETENTION_DAYS", default=14, min_value=1)
     min_free_mb = _env_int("MIN_FREE_DISK_MB_FOR_SNAPSHOT", default=500, min_value=1)
@@ -201,8 +269,9 @@ def load_config(env_file: Path | None = None) -> Config:
     notifier = _load_notifier()
 
     return Config(
-        openclaw_bin_path=Path(bin_raw).expanduser(),
-        openclaw_config_path=Path(cfg_raw).expanduser(),
+        targets=targets,
+        openclaw=openclaw,
+        hermes=hermes,
         update_time=update_time,
         min_update_age_days=min_update_age,
         supervisor_interval_minutes=interval,
@@ -218,8 +287,83 @@ def load_config(env_file: Path | None = None) -> Config:
     )
 
 
+def _parse_targets(raw: str) -> tuple[str, ...]:
+    """TARGETS is a comma-separated list; default openclaw; order preserved."""
+    if not raw:
+        return ("openclaw",)
+    seen: list[str] = []
+    for item in raw.split(","):
+        name = item.strip().lower()
+        if not name:
+            continue
+        if name not in VALID_TARGETS:
+            raise ConfigError(
+                f"TARGETS entries must be one of {', '.join(VALID_TARGETS)}. "
+                f"Got: {name!r}."
+            )
+        if name not in seen:
+            seen.append(name)
+    if not seen:
+        raise ConfigError("TARGETS must list at least one of openclaw, hermes.")
+    return tuple(seen)
+
+
+def _load_openclaw(path: Path, *, default_min_age: int) -> OpenClawSettings:
+    bin_raw = _env("OPENCLAW_BIN_PATH")
+    cfg_raw = _env("OPENCLAW_CONFIG_PATH")
+    if not bin_raw:
+        raise ConfigError(f"OPENCLAW_BIN_PATH is required when openclaw is in TARGETS. Set it in {path}.")
+    if not cfg_raw:
+        raise ConfigError(f"OPENCLAW_CONFIG_PATH is required when openclaw is in TARGETS. Set it in {path}.")
+    return OpenClawSettings(
+        bin_path=Path(bin_raw).expanduser(),
+        config_path=Path(cfg_raw).expanduser(),
+        min_update_age_days=_env_int(
+            "OPENCLAW_MIN_UPDATE_AGE_DAYS", default=default_min_age, min_value=0
+        ),
+        skip_versions=_env_list("OPENCLAW_SKIP_VERSIONS"),
+    )
+
+
+def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
+    bin_raw = _env("HERMES_BIN_PATH") or str(Path.home() / ".local" / "bin" / "hermes")
+    home_raw = _env("HERMES_HOME") or str(Path.home() / ".hermes")
+    home = Path(home_raw).expanduser()
+    source_raw = _env("HERMES_SOURCE_DIR")
+    source_dir = Path(source_raw).expanduser() if source_raw else home / "hermes-agent"
+    mode = (_env("HERMES_UPDATE_MODE") or "release-tag").lower()
+    if mode not in VALID_HERMES_UPDATE_MODES:
+        raise ConfigError(
+            f"HERMES_UPDATE_MODE must be one of {', '.join(VALID_HERMES_UPDATE_MODES)}. "
+            f"Got: {mode!r}."
+        )
+    channel = _env("HERMES_UPDATE_CHANNEL") or None
+    return HermesSettings(
+        bin_path=Path(bin_raw).expanduser(),
+        home=home,
+        source_dir=source_dir,
+        update_mode=mode,
+        update_channel=channel,
+        min_update_age_days=_env_int(
+            "HERMES_MIN_UPDATE_AGE_DAYS", default=default_min_age, min_value=0
+        ),
+        skip_tags=_env_list("HERMES_SKIP_TAGS"),
+        doctor_fix=_env_bool("HERMES_DOCTOR_FIX", default=True),
+        gateway_restart_timeout_seconds=_env_int(
+            "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS", default=2400, min_value=60
+        ),
+    )
+
+
 def _env(name: str) -> str:
     return os.environ.get(name, "").strip()
+
+
+def _env_list(name: str) -> tuple[str, ...]:
+    raw = _env(name)
+    if not raw:
+        return ()
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 def _env_int(name: str, *, default: int, min_value: int) -> int:

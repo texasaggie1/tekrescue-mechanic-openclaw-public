@@ -4,6 +4,11 @@ The CLI is the human-facing surface of Mechanic. Subcommands wire up logging,
 load configuration, and dispatch to the right module. The launchd-scheduled
 loops (supervisor and updater) have their own entry points so they can run
 without going through the CLI; everything else hangs off the subparsers here.
+
+Every command that acts on one product takes `--target openclaw|hermes`.
+The default is openclaw when it is the only target configured, so a v0.1
+install keeps its muscle memory; with several targets, commands that
+mutate (restore, resume, capture-first-good) require `--target`.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 from .config import (
@@ -40,8 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="mechanic",
         description=(
-            "tekRESCUE Mechanic for OpenClaw: a macOS supervisor that "
-            "auto-heals OpenClaw after broken updates."
+            "tekRESCUE Mechanic: a macOS supervisor that keeps OpenClaw and "
+            "Hermes Agent updated a week behind the bleeding edge, with "
+            "backups, verification, and a circuit breaker."
         ),
     )
     parser.add_argument(
@@ -51,23 +58,36 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("status", help="Show current configuration, launchd state, and recent log lines.")
-    sub.add_parser("run-now", help="Run the nightly update routine immediately (foreground).")
-    sub.add_parser("resume", help="Clear paused state and reset the failure counter.")
+    def add_target(p: argparse.ArgumentParser, *, help_text: str) -> None:
+        p.add_argument("--target", default=None, help=help_text)
 
-    restore = sub.add_parser("restore", help="Restore OpenClaw config from a snapshot.")
+    sub.add_parser("status", help="Show current configuration, launchd state, and recent log lines.")
+
+    plan_p = sub.add_parser("plan", help="Show what tonight's run would do for each target, without changing anything.")
+    add_target(plan_p, help_text="Only this target (openclaw or hermes).")
+
+    run_p = sub.add_parser("run-now", help="Run the nightly update routine immediately (foreground).")
+    add_target(run_p, help_text="Only this target (openclaw or hermes). Default: every target in TARGETS.")
+
+    resume_p = sub.add_parser("resume", help="Clear paused state and reset the failure counter.")
+    add_target(resume_p, help_text="Which target to resume (openclaw or hermes).")
+
+    restore = sub.add_parser("restore", help="Restore a target's data (and, for Hermes, code) from a snapshot.")
     restore.add_argument(
-        "target",
+        "snapshot",
         help="Snapshot to restore: 'first-known-good', 'last-known-good', or a nightly id like 2026-05-23T02-00-00Z.",
     )
+    add_target(restore, help_text="Which target to restore (openclaw or hermes).")
+
+    cfg_p = sub.add_parser(
+        "capture-first-good",
+        help="Snapshot a target as first-known-good (only if currently healthy).",
+    )
+    add_target(cfg_p, help_text="Which target to snapshot (openclaw or hermes).")
 
     sub.add_parser(
-        "capture-first-good",
-        help="Snapshot OpenClaw as first-known-good (only if currently healthy).",
-    )
-    sub.add_parser(
         "capture-prompts",
-        help="Run doctor interactively and record prompts for nightly replay.",
+        help="Run openclaw doctor interactively and record prompts for nightly replay.",
     )
 
     logs = sub.add_parser("logs", help="Print the tail of the mechanic log.")
@@ -78,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
 
     install_p = sub.add_parser("install", help="Install LaunchAgents and create the config directory.")
     install_p.add_argument("--i-have-a-backup", action="store_true",
-                            help="Skip the interactive backup confirmation. Use only if you have already backed up OpenClaw's config.")
+                            help="Skip the interactive backup confirmation. Use only if you have already backed up your agent's data.")
 
     uninstall_p = sub.add_parser("uninstall", help="Remove LaunchAgents and optionally purge data.")
     uninstall_p.add_argument("--purge", action="store_true", help="Also delete logs and snapshots.")
@@ -87,14 +107,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return _cmd_status()
+    if args.command == "plan":
+        return _cmd_plan(args.target)
     if args.command == "run-now":
-        return _cmd_run_now()
+        return _cmd_run_now(args.target)
     if args.command == "resume":
-        return _cmd_resume()
+        return _cmd_resume(args.target)
     if args.command == "restore":
-        return _cmd_restore(args.target)
+        return _cmd_restore(args.snapshot, args.target)
     if args.command == "capture-first-good":
-        return _cmd_capture_first_good()
+        return _cmd_capture_first_good(args.target)
     if args.command == "capture-prompts":
         return _cmd_capture_prompts()
     if args.command == "logs":
@@ -108,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
 
 
 def _cmd_status() -> int:
@@ -133,24 +160,19 @@ def _cmd_status() -> int:
 
 
 def _print_status(config: Config) -> None:
-    print("tekRESCUE Mechanic for OpenClaw")
+    from . import daemon
+    from .rollback import store_for
+
+    print("tekRESCUE Mechanic")
     print(f"  version: {__version__}")
     print()
 
     print("Configuration:")
     print(f"  file:                {CONFIG_FILE} ({_path_state(CONFIG_FILE, kind='file')})")
-    print(
-        f"  openclaw bin:        {config.openclaw_bin_path} "
-        f"({_path_state(config.openclaw_bin_path, kind='file')})"
-    )
-    print(
-        f"  openclaw config:     {config.openclaw_config_path} "
-        f"({_path_state(config.openclaw_config_path, kind='dir')})"
-    )
+    print(f"  targets:             {', '.join(config.targets)}")
     print(f"  update time:         {config.update_time} local")
-    print(f"  min update age:      {_min_update_age_state(config)}")
+    print(f"  min update age:      {config.min_update_age_days} days (default for every target)")
     print(f"  supervisor interval: {config.supervisor_interval_minutes} min")
-    print(f"  prompt mode:         {config.prompt_mode}")
     print(f"  snapshot retention:  {config.snapshot_retention_days} days")
     print(f"  min free disk:       {config.min_free_disk_mb_for_snapshot} MB")
     print(f"  max failures:        {config.max_consecutive_failures}")
@@ -162,28 +184,61 @@ def _print_status(config: Config) -> None:
     print(f"  notifier:            {config.notifier.kind}")
     print()
 
+    if config.openclaw is not None:
+        oc = config.openclaw
+        print("OpenClaw:")
+        print(f"  openclaw bin:        {oc.bin_path} ({_path_state(oc.bin_path, kind='file')})")
+        print(f"  openclaw config:     {oc.config_path} ({_path_state(oc.config_path, kind='dir')})")
+        print(f"  min update age:      {_openclaw_age_state(config)}")
+        print(f"  prompt mode:         {config.prompt_mode}")
+        if oc.skip_versions:
+            print(f"  skip versions:       {', '.join(oc.skip_versions)}")
+        print(f"  gateway:             {_gateway_state(daemon.OPENCLAW_DAEMON_LABEL)}")
+        print(f"  state:               {_state_line('openclaw')}")
+        print()
+
+    if config.hermes is not None:
+        hs = config.hermes
+        from .hermes_release import checkout_present
+
+        checkout = checkout_present(hs)
+        print("Hermes:")
+        print(f"  hermes bin:          {hs.bin_path} ({_path_state(hs.bin_path, kind='file')})")
+        print(f"  hermes home:         {hs.home} ({_path_state(hs.home, kind='dir')})")
+        print(f"  source checkout:     {hs.source_dir} ({'ok' if checkout is None else checkout})")
+        print(f"  update mode:         {hs.update_mode}")
+        if hs.update_channel:
+            print(f"  update channel:      {hs.update_channel}")
+        print(f"  min update age:      {hs.min_update_age_days} days")
+        print(f"  doctor --fix:        {'yes' if hs.doctor_fix else 'no'}")
+        if hs.skip_tags:
+            print(f"  skip tags:           {', '.join(hs.skip_tags)}")
+        print(f"  gateway:             {_gateway_state(daemon.HERMES_DAEMON_LABEL)}")
+        print(f"  state:               {_state_line('hermes')}")
+        print()
+
     print("Launchd:")
     print(f"  supervisor agent:    {_launchd_state(SUPERVISOR_LABEL, SUPERVISOR_PLIST)}")
     print(f"  updater agent:       {_launchd_state(UPDATER_LABEL, UPDATER_PLIST)}")
     print()
 
     print("Snapshots:")
-    latest = _latest_snapshot(SNAPSHOT_DIR)
-    if latest is None:
-        print("  none yet")
-    else:
-        print(f"  latest: {latest}")
+    for name in config.targets:
+        store = store_for(config, name)
+        latest = _latest_snapshot(store.root)
+        label = f"{name}:".ljust(10)
+        print(f"  {label} {latest if latest is not None else 'none yet'}")
     print()
 
     print(f"Recent log ({LOG_FILE}):")
     _print_tail(LOG_FILE, lines=10)
 
 
-def _min_update_age_state(config: Config) -> str:
-    """Describe the release waiting period and whether npm can serve it."""
+def _openclaw_age_state(config: Config) -> str:
+    """Describe OpenClaw's waiting period and whether npm can serve it."""
     from .release_age import find_npm
 
-    days = config.min_update_age_days
+    days = config.openclaw.min_update_age_days if config.openclaw else config.min_update_age_days
     if days <= 0:
         return "0 days (waiting period off)"
     npm = find_npm(config)
@@ -193,6 +248,32 @@ def _min_update_age_state(config: Config) -> str:
             f"updates wait until it is)"
         )
     return f"{days} days (npm: {npm})"
+
+
+def _gateway_state(label: str) -> str:
+    from . import daemon
+
+    disabled = daemon.is_disabled(label)
+    loaded = daemon.is_loaded(label)
+    if disabled:
+        return f"{label} DISABLED by operator (Mechanic leaves this product alone)"
+    if loaded:
+        return f"{label} loaded"
+    if disabled is None:
+        return f"{label} not loaded (launchctl unavailable)"
+    return f"{label} not loaded"
+
+
+def _state_line(target: str) -> str:
+    from .state import load_state
+
+    state = load_state(target=target)
+    if state.paused:
+        return f"PAUSED since {state.paused_at} ({state.pause_reason})"
+    parts = [f"{state.consecutive_failures} consecutive failures"]
+    if state.last_success:
+        parts.append(f"last success {state.last_success}")
+    return ", ".join(parts)
 
 
 def _path_state(path: Path, *, kind: str) -> str:
@@ -229,7 +310,10 @@ def _launchd_state(label: str, plist: Path) -> str:
 def _latest_snapshot(snapshot_dir: Path) -> Path | None:
     if not snapshot_dir.exists():
         return None
-    candidates = [p for p in snapshot_dir.iterdir() if p.is_dir()]
+    candidates = [
+        p for p in snapshot_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != "hermes"
+    ]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -252,152 +336,258 @@ def _print_tail(log_file: Path, *, lines: int) -> None:
         print(f"  {line.rstrip()}")
 
 
-def _cmd_run_now() -> int:
+# ---------------------------------------------------------------------------
+# plan
+# ---------------------------------------------------------------------------
+
+
+def _cmd_plan(only: Optional[str]) -> int:
+    """Dry run of the nightly's decision for each target. Nothing changes.
+
+    The one write is Hermes's tag ledger (first-sight records), which is
+    exactly what you want before the first supervised nightly: run this,
+    read what Mechanic would pin to, then let the 02:00 fire do it.
+    """
+    from .targets import build_targets
+
+    config = _load_config_or_die()
+    if config is None:
+        return 1
+    _configure_logging(config, also_stderr=False)
+    try:
+        targets = build_targets(config, only=only)
+    except ValueError as exc:
+        print(f"{exc}")
+        return 1
+
+    worst = 0
+    for target in targets:
+        print(f"== {target.display_name} ==")
+        if target.disabled_by_operator():
+            print(f"  gateway {target.service_label} is DISABLED by the operator.")
+            print(f"  Tonight: nothing. Mechanic does not run {target.display_name}'s CLI while it is disabled.")
+            print()
+            continue
+        health = target.probe()
+        print(f"  health:   {health.short_summary()}")
+        if not health.healthy:
+            print(f"  Tonight: skip the update, run doctor, verify. Reason: {health.reason}")
+            print()
+            worst = 1
+            continue
+        assessment = target.assess(health)
+        print(f"  {assessment.reason}")
+        for note in assessment.notes:
+            print(f"  note: {note}")
+        if assessment.install:
+            plan = assessment.plan
+            what = getattr(plan, "target_tag", None) or getattr(plan, "target_version", None)
+            print(f"  Tonight: snapshot, install {what}, doctor, verify.")
+        elif assessment.error:
+            print("  Tonight: snapshot, NO install (could not establish the facts), doctor, verify.")
+        else:
+            print("  Tonight: snapshot, no install (waiting), doctor, verify.")
+        print()
+    return worst
+
+
+# ---------------------------------------------------------------------------
+# run-now / resume / restore / capture
+# ---------------------------------------------------------------------------
+
+
+def _cmd_run_now(only: Optional[str]) -> int:
     from .updater import run_updater
     config = _load_config_or_die()
     if config is None:
         return 1
     _configure_logging(config, also_stderr=True)
-    return run_updater(config)
+    try:
+        return run_updater(config, only=only)
+    except ValueError as exc:
+        print(f"{exc}")
+        return 1
 
 
-def _cmd_resume() -> int:
+def _pick_target(config: Config, requested: Optional[str], *, verb: str) -> Optional[str]:
+    """Resolve --target: the only configured target when there is one."""
+    if requested:
+        if requested not in config.targets:
+            print(f"{requested!r} is not in TARGETS ({', '.join(config.targets)}).")
+            return None
+        return requested
+    if len(config.targets) == 1:
+        return config.targets[0]
+    print(f"Several targets are configured ({', '.join(config.targets)}).")
+    print(f"Say which one to {verb}: --target openclaw or --target hermes.")
+    return None
+
+
+def _cmd_resume(requested: Optional[str]) -> int:
     from .state import load_state, resume, save_state
     config = _load_config_or_die()
     if config is None:
         return 1
     _configure_logging(config, also_stderr=False)
-    state = load_state()
+    target = _pick_target(config, requested, verb="resume")
+    if target is None:
+        return 1
+    state = load_state(target=target)
     if not state.paused:
-        print("Not paused. Nothing to do.")
+        print(f"{target}: not paused. Nothing to do.")
         return 0
-    print(f"Resuming. Was paused since {state.paused_at} ({state.pause_reason}).")
-    save_state(resume(state))
-    print("Mechanic is no longer paused. The next nightly run will proceed.")
+    print(f"Resuming {target}. Was paused since {state.paused_at} ({state.pause_reason}).")
+    save_state(resume(state), target=target)
+    print(f"{target} is no longer paused. The next nightly run will proceed.")
     return 0
 
 
-def _cmd_restore(target: str) -> int:
-    from .daemon import DaemonControlError, is_loaded, start, stop, OPENCLAW_DAEMON_LABEL
-    from .rollback import (
-        KIND_FIRST_KNOWN_GOOD,
-        KIND_LAST_KNOWN_GOOD,
-        NIGHTLY_DIR,
-        RollbackError,
-        get_sticky,
-        restore_snapshot,
-        _snapshot_from_path,
-    )
+def _cmd_restore(snapshot_name: str, requested: Optional[str]) -> int:
+    from . import daemon
+    from .rollback import RollbackError, find_snapshot, restore_snapshot, store_for
+
     config = _load_config_or_die()
     if config is None:
         return 1
     _configure_logging(config, also_stderr=True)
+    target = _pick_target(config, requested, verb="restore")
+    if target is None:
+        return 1
+    store = store_for(config, target)
 
-    if target in (KIND_FIRST_KNOWN_GOOD, KIND_LAST_KNOWN_GOOD):
-        snapshot = get_sticky(target)
-        if snapshot is None:
-            print(f"No {target} snapshot exists yet.")
-            return 1
-    else:
-        candidate = NIGHTLY_DIR / target
-        if not candidate.is_dir():
-            print(f"No nightly snapshot named {target!r}.")
-            print(f"  Looked in {NIGHTLY_DIR}")
-            return 1
-        try:
-            snapshot = _snapshot_from_path(candidate)
-        except RollbackError as exc:
-            print(f"Snapshot at {candidate} is unreadable: {exc}")
-            return 1
+    try:
+        snapshot = find_snapshot(store, snapshot_name)
+    except RollbackError as exc:
+        print(f"Snapshot {snapshot_name!r} is unreadable: {exc}")
+        return 1
+    if snapshot is None:
+        print(f"No {target} snapshot named {snapshot_name!r}.")
+        print(f"  Looked in {store.root}")
+        return 1
 
-    daemon_was_loaded = is_loaded()
+    label = daemon.label_for(target)
+    daemon_was_loaded = daemon.is_loaded(label)
+    code_sha = snapshot.extra.get("code_sha") if target == "hermes" else None
 
-    print(f"Restoring OpenClaw config from {snapshot.path}")
+    print(f"Restoring {target} data from {snapshot.path}")
     print(f"  source captured at: {snapshot.captured_at}")
-    print(f"  openclaw version:   {snapshot.openclaw_version or 'unknown'}")
-    print(f"  destination:        {config.openclaw_config_path}")
+    print(f"  version:            {snapshot.version or 'unknown'}")
+    print(f"  destination:        {store.source}")
     print(f"  archive size:       {snapshot.archive_path.stat().st_size // (1024*1024)} MB")
+    if code_sha:
+        print(f"  code checkout:      will be put back on {code_sha[:12]} "
+              f"({snapshot.extra.get('code_label') or 'untagged'}) and rebuilt with hermes pm install")
     print()
     if daemon_was_loaded:
-        print(f"The {OPENCLAW_DAEMON_LABEL} daemon is running and will be stopped")
+        print(f"The {label} daemon is running and will be stopped")
         print("during the restore, then restarted afterwards.")
     else:
-        print(f"The {OPENCLAW_DAEMON_LABEL} daemon is not currently running.")
+        print(f"The {label} daemon is not currently running.")
         print("Restore will proceed without daemon control.")
     print()
-    answer = input("Proceed? This will overwrite the live config. [y/N] ").strip().lower()
+    answer = input("Proceed? This will overwrite the live data. [y/N] ").strip().lower()
     if answer not in ("y", "yes"):
         print("Aborted.")
         return 1
 
     if daemon_was_loaded:
         try:
-            print(f"Stopping {OPENCLAW_DAEMON_LABEL}...")
-            stop()
-        except DaemonControlError as exc:
+            print(f"Stopping {label}...")
+            daemon.stop(label=label)
+        except daemon.DaemonControlError as exc:
             print(f"Could not stop daemon: {exc}")
-            print("Restore aborted. OpenClaw config was not modified.")
+            print("Restore aborted. Nothing was modified.")
             return 1
 
     try:
-        print("Extracting archive over OpenClaw config directory...")
-        restore_snapshot(config, snapshot)
+        print("Extracting archive over the data directory...")
+        restore_snapshot(store, snapshot)
     except RollbackError as exc:
         print(f"Restore failed: {exc}")
-        if daemon_was_loaded:
-            print(f"Restarting {OPENCLAW_DAEMON_LABEL} (best effort)...")
-            try:
-                start()
-            except DaemonControlError as start_exc:
-                print(f"  daemon restart also failed: {start_exc}")
-                print(f"  run `launchctl load {Path.home()}/Library/LaunchAgents/{OPENCLAW_DAEMON_LABEL}.plist` manually")
+        _restart_after_restore(daemon_was_loaded, label)
         return 1
 
+    if code_sha:
+        rc = _restore_hermes_code(config, code_sha)
+        if rc != 0:
+            _restart_after_restore(daemon_was_loaded, label)
+            return rc
+
     print("Restore complete.")
-    if daemon_was_loaded:
-        try:
-            print(f"Restarting {OPENCLAW_DAEMON_LABEL}...")
-            start()
-        except DaemonControlError as exc:
-            print(f"Daemon restart failed: {exc}")
-            print(f"Run `launchctl load {Path.home()}/Library/LaunchAgents/{OPENCLAW_DAEMON_LABEL}.plist` manually.")
-            return 1
-        print(f"{OPENCLAW_DAEMON_LABEL} is back up.")
+    return _restart_after_restore(daemon_was_loaded, label)
+
+
+def _restore_hermes_code(config: Config, code_sha: str) -> int:
+    from .hermes_release import _git, _hermes, PM_INSTALL_TIMEOUT_SECONDS
+
+    assert config.hermes is not None
+    spec = config.hermes
+    print(f"Putting the Hermes checkout back on {code_sha[:12]}...")
+    result = _git(spec, "checkout", "--quiet", "--detach", code_sha)
+    if not result.ok:
+        print(f"  git checkout failed: {result.tail()}")
+        return 1
+    print("Rebuilding the dependency environment (hermes pm install)...")
+    result = _hermes(spec, "pm", "install", timeout=PM_INSTALL_TIMEOUT_SECONDS)
+    if not result.ok:
+        print(f"  hermes pm install failed: {result.tail()}")
+        return 1
+    print("  code restored.")
     return 0
 
 
-def _cmd_capture_first_good() -> int:
-    from .rollback import (
-        KIND_FIRST_KNOWN_GOOD,
-        RollbackError,
-        capture_snapshot,
-    )
+def _restart_after_restore(was_loaded: bool, label: str) -> int:
+    from . import daemon
+
+    if not was_loaded:
+        return 0
+    try:
+        print(f"Restarting {label}...")
+        daemon.start(label=label)
+    except daemon.DaemonControlError as exc:
+        print(f"Daemon restart failed: {exc}")
+        print(f"Run `launchctl load {LAUNCHAGENTS_DIR}/{label}.plist` manually.")
+        return 1
+    print(f"{label} is back up.")
+    return 0
+
+
+def _cmd_capture_first_good(requested: Optional[str]) -> int:
+    from .rollback import KIND_FIRST_KNOWN_GOOD, RollbackError, capture_snapshot
     from .state import load_state, mark_first_known_good_captured, save_state
-    from .verifier import verify_openclaw
+    from .targets import build_targets
 
     config = _load_config_or_die()
     if config is None:
         return 1
     _configure_logging(config, also_stderr=True)
-
-    print("Verifying OpenClaw is healthy before snapshotting...")
-    result = verify_openclaw(config)
-    if not result.healthy:
-        print(f"OpenClaw is NOT healthy ({result.short_summary()}). Refusing to capture first-known-good.")
-        print("Fix OpenClaw, then run `mechanic capture-first-good` again.")
+    name = _pick_target(config, requested, verb="snapshot")
+    if name is None:
         return 1
-    print(f"OpenClaw is healthy: {result.short_summary()}")
+    target = build_targets(config, only=name)[0]
+
+    print(f"Verifying {target.display_name} is healthy before snapshotting...")
+    result = target.probe()
+    if not result.healthy:
+        print(f"{target.display_name} is NOT healthy ({result.short_summary()}). Refusing to capture first-known-good.")
+        print(f"Fix {target.display_name}, then run `mechanic capture-first-good --target {name}` again.")
+        return 1
+    print(f"{target.display_name} is healthy: {result.short_summary()}")
+    pre_note = target.pre_snapshot()
+    if pre_note:
+        print(f"  {pre_note}")
     try:
         snapshot = capture_snapshot(
-            config,
+            target.store(),
             kind=KIND_FIRST_KNOWN_GOOD,
-            openclaw_version=result.version,
+            version=result.version,
             verified_healthy=True,
+            extra=target.snapshot_extra(),
         )
     except RollbackError as exc:
         print(f"Snapshot failed: {exc}")
         return 1
-    save_state(mark_first_known_good_captured(load_state()))
+    save_state(mark_first_known_good_captured(load_state(target=name)), target=name)
     print(f"Captured first-known-good at {snapshot.path}")
     return 0
 
@@ -407,9 +597,17 @@ def _cmd_capture_prompts() -> int:
     config = _load_config_or_die()
     if config is None:
         return 1
+    if config.openclaw is None:
+        print("capture-prompts is an OpenClaw command and openclaw is not in TARGETS.")
+        return 1
     _configure_logging(config, also_stderr=False)
     capture_prompts(config)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# logs / notifier / install / uninstall
+# ---------------------------------------------------------------------------
 
 
 def _cmd_logs(lines: int, follow: bool) -> int:
