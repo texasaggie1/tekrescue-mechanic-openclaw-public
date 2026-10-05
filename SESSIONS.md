@@ -51,6 +51,11 @@ agents, Ollama still listening on 11434, the Hermes gateway untouched at
 pid 37096. The plist was left in place; `launchctl enable
 gui/502/ai.openclaw.gateway` plus `launchctl bootstrap gui/502
 ~/Library/LaunchAgents/ai.openclaw.gateway.plist` brings it back.
+Proven across a reboot (2026-10-05 ~02:00 UTC, checked at 58 min
+uptime): OpenClaw stayed down (disabled flag held, unknown to both
+launchd domains, no process); the Hermes gateway came back on its own
+with a new pid; both Mechanic agents loaded; Ollama listening on 11434
+from the login item, so the mini auto-logs in at the desktop.
 Lesson for the next operator check: `pgrep -fl openclaw` matches the
 macOS username in every path and environment string; use
 `pgrep -fl 'node_modules/openclaw|openclaw gateway|openclaw/dist'`.
