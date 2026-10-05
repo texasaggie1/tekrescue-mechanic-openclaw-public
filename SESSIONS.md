@@ -40,7 +40,7 @@ Be honest about half-finished work.
 
 ## 2026-10-04 (UTC) - branch: main - v0.2.0 merged to main
 
-### Resume here (checkpoint rewritten 2026-10-04 ~20:00 UTC: deployment COMPLETE)
+### Resume here (checkpoint rewritten 2026-10-05 ~00:30 UTC: deployment COMPLETE, both repos at v0.2.0)
 The supervised deployment on the operator's Mac mini finished on
 2026-10-04. Steps 1 to 5 below are done; what remains is watching and
 the maintainer's own follow-ups (step 6). The OpenClaw gateway was taken
@@ -69,9 +69,12 @@ Where the code is:
 - Public repo: `main` and `claude/open-claw-version-delay-gr91ha` point
   at the same commit (v0.2.0 with the round 4 fixes), fast-forwarded
   2026-10-04 after round 5 passed on the Mac.
-- The maintainer's private line is at its v0.1.5; it has NOT adopted
-  v0.2.0. Its public checkout lives in a `public/` subfolder of the
-  private clone on the Mac; the maintainer owns the adoption commit.
+- The maintainer's private line adopted v0.2.0 on 2026-10-05 00:12 UTC
+  (its commit `25b5094`, 33 files) via `scripts/maintainer/
+  sync-from-public.sh`, run by the operator on the Mac; its own
+  instruction file and session log were updated in the same commit. Its
+  public checkout lives in a `public/` subfolder of that clone, now on
+  `main` at `0d96eec`.
 - 84 unit tests pass (`python -m unittest discover -s tests`); the
   simulated nightlies for both targets pass with a domain-faithful fake
   launchctl.
@@ -79,7 +82,8 @@ Where the code is:
 The Mac mini (user `openclaw`, uid 502):
 - Private clone `/Users/openclaw/Projects/tekrescue-mechanic-openclaw`,
   venv `.venv` there; `mechanic` in that venv is an editable install of
-  `public/` (the public checkout inside it), reporting 0.2.0. Mechanic's
+  that clone's root again (it pointed at `public/` during the
+  walkthrough), reporting 0.2.0, targets hermes. Mechanic's
   own LaunchAgents `com.tekrescue.mechanic.supervisor` (every 240 min)
   and `com.tekrescue.mechanic.updater` (02:00 local) are loaded and run
   that venv, so they execute whatever `public/` is checked out at.
@@ -156,11 +160,13 @@ Exact next steps, in order (steps 1 to 4 done):
    plist. If TARGETS still lists openclaw, `mechanic status` must then
    show it DISABLED by operator and the heartbeat must say so, not
    restart it. Dropping openclaw from TARGETS is the belt-and-braces.
-6. Maintainer follow-ups (theirs, not ours): adopt v0.2.0 into the
-   private line; the private repo's instruction that Hermes must never
-   be touched is superseded by the operator's explicit request today and
-   should be rewritten there; `scripts/deps/relock.sh` for the
-   idna/urllib3 bumps.
+6. DONE 2026-10-05 00:12 UTC: v0.2.0 adopted into the private line and
+   its Hermes rule rewritten. Still open: `scripts/deps/relock.sh` for
+   the idna/urllib3 bumps. Disk on the Mac (2026-10-04 evening): 70 GB
+   free of 228; Hermes store 2.0 GB; the old OpenClaw store 12.5 GB,
+   frozen (never pruned again with TARGETS=hermes). 30 days of Hermes
+   snapshots is about 12.4 GB and fits; retention stays at 30 unless the
+   operator chooses 14; reclaiming the OpenClaw nightlies is theirs.
 
 ### What we did
 - Fast-forwarded `main` from `f5b9cac` (v0.1.4) to the v0.2.0 branch head
@@ -191,16 +197,17 @@ on that machine: the Ollama pre-flight and the OpenClaw gateway shutdown
   README tells operators to check parentage before a bootout.
 
 ### Open questions
-- Carried: the private line's adoption of v0.2.0; whether `hermes pm
-  install` republishes the launcher on a real pin night; the stable
-  channel.
+- Carried: whether `hermes pm install` republishes the launcher on a
+  real pin night; the stable channel; snapshot retention on the Mac
+  (30 fits, 14 is the comfort option).
 
 ### Next session should
-1. Finish the Resume block: Ollama verdict, then the OpenClaw gateway
-   offline (disable before bootout, in its own domain).
-2. Watch the first unattended 02:00 nightly and the heartbeats for a
+1. Watch the first unattended 02:00 nightly and the heartbeats for a
    day; capture the real `hermes pm status` output for the fixtures.
-3. `scripts/deps/relock.sh` for the idna/urllib3 bumps.
+2. The first real pin, when a Hermes tag newer than v2026.9.24 ages 7
+   days in the ledger: confirm the launcher and plist survive it.
+3. `scripts/deps/relock.sh` for the idna/urllib3 bumps, then the normal
+   private-to-public sync of the lock.
 
 ---
 
