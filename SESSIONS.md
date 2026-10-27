@@ -40,7 +40,7 @@ Be honest about half-finished work.
 
 ## 2026-10-27 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.1, Hermes's new release scheme
 
-### Resume here (checkpoint rewritten 2026-10-27 ~03:10 UTC Mac time 22:10 CDT 10-26: first live pin DONE, post-op checks pending)
+### Resume here (checkpoint rewritten 2026-10-27 ~03:30 UTC: first live pin DONE and verified; private adoption pending)
 A supervised run on the operator's Mac mini is next; the operator pastes
 terminal output and expects the next command block. Every command block
 given to the operator must start with `cd` to an absolute path.
@@ -103,11 +103,19 @@ Exact next steps:
    status`). Expect STATUS: SUCCESS and a `Hermes version` line that
    changes. On failure the report says whether the code was rolled back;
    `mechanic restore --target hermes <snapshot>` puts data and code back.
-4. PENDING, post-op (the briefing's rule 5): pull the tag-fetch fix,
-   run the one-time tag repair, `hermes --version` (expect 0.22.5),
-   `hermes gateway status`, `hermes doctor` to read the 4 findings (the
-   operator's), and the operator sends the agent a message and asks who
-   it is. Then watch the 02:00 nightly report "already v0.22.5".
+4. DONE (round 4, ~03:20 UTC): tag repair applied; `hermes --version`
+   prints "Hermes Agent v0.22.5 (2026.9.24) · stable · local
+   bf0203a794a0 ... Up to date" (Hermes's own updater agrees it is
+   current on stable); `hermes gateway status`: service definition
+   matches the install, supervised by launchd, PID 89958. Doctor's 4
+   findings are Hermes's advice to the operator, none from the pin:
+   missing API keys for some tools, and npm vulnerabilities in the root,
+   web and ui-tui workspaces ("wait for an upstream lockfile fix"). So
+   the product builds exist and doctor is content with them; the
+   open question about what the pin skips is closed for this setup.
+   Telegram delivered the report as plain text. Still the operator's:
+   message the agent and ask who it is. The 02:00 nightly should say
+   "already v0.22.5".
 5. Then adopt v0.2.1 into the private line (`sync-from-public.sh`, its
    own CLAUDE.md note and SESSIONS entry), repoint the venv at the
    private root, record the outcome here.
@@ -159,7 +167,9 @@ on a live install: Hermes moved from a 2026.9.24-era commit to v0.22.5
 in two minutes with a verified gateway restart. Post-op checks and the
 private adoption remain (Resume block). The product-build question
 (Hermes's updater rebuilds TUI/web/desktop after a checkout move;
-Mechanic's pin does not) is still open; nothing in the run complained.
+Mechanic's pin does not) is closed for this setup: `hermes doctor` after
+the pin sees the workspaces and complains only about upstream npm
+advisories; `hermes --version` reports stable and up to date.
 
 ### Decisions made
 - Keep the git pin as the default; `hermes update` cannot pin, so a
@@ -176,14 +186,11 @@ Mechanic's pin does not) is still open; nothing in the run complained.
   README, .env.example and AGENTS.md rather than hidden.
 
 ### Open questions
-- Mechanic's pin skips the product builds (TUI/web/desktop) and bytecode
-  sweep Hermes's updater runs after a checkout moves. The Mac runs the
-  Telegram gateway; whether the missing builds matter there is what the
-  supervised run tells us. If they do, find the public command that
-  rebuilds them, or document `hermes update --yes` as the way to catch up
-  once the pinned tag is the latest stable.
-- Which of v0.22.1 to v0.22.5 are published Releases (the Mac's check
-  will say).
+- Mechanic's pin skips the bytecode sweep Hermes's updater runs after a
+  checkout moves; nothing showed on the Mac. Revisit only if a pin night
+  ever reports stale behaviour.
+- v0.22.2 and v0.22.5 are published Releases (the Mac's check accepted
+  both); the others were never asked about.
 - Carried: snapshot retention (30 fits), idna/urllib3 relock, the private
   line's adoption of this release.
 
