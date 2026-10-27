@@ -68,7 +68,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from .config import HermesSettings, RUNTIME_STATE_DIR, clean_subprocess_env
 from .release_age import version_key
@@ -98,8 +98,29 @@ UPSTREAM_TAG_NAMESPACE = "refs/mechanic/upstream-tags/"
 MODE_RELEASE_TAG = "release-tag"
 MODE_HERMES_UPDATE = "hermes-update"
 
-#: (published?, why). None means "could not tell", which installs nothing.
-ReleaseCheck = Callable[[str], tuple[Optional[bool], str]]
+class ReleaseVerdict(NamedTuple):
+    """What GitHub says about one tag.
+
+    `published` None means "could not tell", which installs nothing.
+    `critical` is True when the release name or notes carry one of the
+    operator's critical keywords: the release may take the fast lane.
+    """
+
+    published: Optional[bool]
+    why: str
+    critical: bool = False
+    critical_why: str = ""
+
+
+ReleaseCheck = Callable[[str], ReleaseVerdict]
+
+
+def _verdict(answer) -> ReleaseVerdict:
+    """Accept a ReleaseVerdict or a plain (published, why) pair."""
+    if isinstance(answer, ReleaseVerdict):
+        return answer
+    published, why = answer[0], answer[1]
+    return ReleaseVerdict(published, why)
 
 
 # ---------------------------------------------------------------------------
@@ -404,14 +425,18 @@ def origin_repository(spec: HermesSettings) -> Optional[str]:
     return repository_from_url(result.stdout)
 
 
-def published_release(repository: str, tag: str, *, get=None) -> tuple[Optional[bool], str]:
+def published_release(
+    repository: str, tag: str, *, keywords: tuple[str, ...] = (), get=None,
+) -> ReleaseVerdict:
     """Is `tag` a published, non-prerelease GitHub Release of `repository`?
 
     True/False with a one-line reason, or None when GitHub could not be
     asked (network, rate limit, an unexpected answer). One anonymous
     request; GitHub allows sixty an hour per address and a nightly makes
-    one or two. Hermes's own updater applies exactly this test, so a tag
-    Mechanic would pin is one Hermes would also install.
+    a handful. Hermes's own updater applies exactly this test, so a tag
+    Mechanic would pin is one Hermes would also install. The release's
+    name and notes are searched for `keywords` (case-insensitive) to flag
+    a critical release for the fast lane.
     """
     import requests  # local: keeps `mechanic plan` cheap when the check is off
 
@@ -426,27 +451,45 @@ def published_release(repository: str, tag: str, *, get=None) -> tuple[Optional[
     try:
         response = (get or requests.get)(url, headers=headers, timeout=GITHUB_API_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 - any transport failure means "unknown"
-        return None, f"GitHub could not be reached ({exc.__class__.__name__}: {exc})"
+        return ReleaseVerdict(None, f"GitHub could not be reached ({exc.__class__.__name__}: {exc})")
     status = getattr(response, "status_code", None)
     if status == 404:
-        return False, f"{tag} has no GitHub Release (a tag, not a release)"
+        return ReleaseVerdict(False, f"{tag} has no GitHub Release (a tag, not a release)")
     if status in (403, 429):
-        return None, f"GitHub API refused the request (HTTP {status}, usually the anonymous rate limit)"
+        return ReleaseVerdict(None, f"GitHub API refused the request (HTTP {status}, usually the anonymous rate limit)")
     if status != 200:
-        return None, f"GitHub API answered HTTP {status}"
+        return ReleaseVerdict(None, f"GitHub API answered HTTP {status}")
     try:
         data = response.json()
     except Exception:  # noqa: BLE001
-        return None, "GitHub API answered with something that is not JSON"
+        return ReleaseVerdict(None, "GitHub API answered with something that is not JSON")
     if not isinstance(data, dict) or data.get("tag_name") != tag:
-        return None, f"GitHub API answered for a different tag than {tag}"
+        return ReleaseVerdict(None, f"GitHub API answered for a different tag than {tag}")
     if data.get("draft") is True:
-        return False, f"{tag} is a draft release"
+        return ReleaseVerdict(False, f"{tag} is a draft release")
     if data.get("prerelease") is True:
-        return False, f"{tag} is a prerelease"
+        return ReleaseVerdict(False, f"{tag} is a prerelease")
     if data.get("draft") is not False or data.get("prerelease") is not False:
-        return None, f"GitHub API answer for {tag} lacks the draft/prerelease fields"
-    return True, f"{tag} is a published release"
+        return ReleaseVerdict(None, f"GitHub API answer for {tag} lacks the draft/prerelease fields")
+    critical, critical_why = release_is_critical(data, keywords)
+    return ReleaseVerdict(True, f"{tag} is a published release", critical, critical_why)
+
+
+def release_is_critical(release: dict, keywords: tuple[str, ...]) -> tuple[bool, str]:
+    """Whether the release name or notes mention one of `keywords`.
+
+    Free text written by whoever published the release; a hijacked
+    account could write "security" to shorten its own wait. That is why
+    the fast lane still has a floor (HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS),
+    still needs a published Release, and is named in the report.
+    """
+    if not keywords:
+        return False, ""
+    text = " ".join(str(release.get(key) or "") for key in ("name", "body")).lower()
+    for keyword in keywords:
+        if keyword and keyword.lower() in text:
+            return True, f"release notes mention {keyword.lower()!r}"
+    return False, ""
 
 
 def release_checker(spec: HermesSettings) -> Optional[ReleaseCheck]:
@@ -455,13 +498,13 @@ def release_checker(spec: HermesSettings) -> Optional[ReleaseCheck]:
         return None
     repository = origin_repository(spec)
 
-    def check(tag: str) -> tuple[Optional[bool], str]:
+    def check(tag: str) -> ReleaseVerdict:
         if repository is None:
-            return None, (
+            return ReleaseVerdict(None, (
                 "the checkout's origin is not a github.com repository, so releases "
                 "cannot be verified; set HERMES_RELEASE_CHECK=none to pin by tag alone"
-            )
-        return published_release(repository, tag)
+            ))
+        return published_release(repository, tag, keywords=spec.critical_keywords)
 
     return check
 
@@ -601,8 +644,11 @@ def plan_update(
 ) -> HermesPlan:
     """Pure decision from already-gathered facts (unit-testable).
 
-    `published_fn` (release_checker) is consulted only for a tag that would
-    actually be pinned; None means no publication check.
+    `published_fn` (release_checker) is consulted for a tag that would
+    actually be pinned, and for tags inside the fast-lane window
+    (critical_min_update_age_days to min_update_age_days old) to learn
+    whether their release is marked critical; None means no publication
+    check and no fast lane.
     """
     min_age = spec.min_update_age_days
     cutoff = now - timedelta(days=min_age)
@@ -634,6 +680,26 @@ def plan_update(
             eligible.append(tag)
         else:
             pending.append(tag)
+
+    # Fast lane: a published release marked critical waits only
+    # critical_min_update_age_days. Verdicts are cached for the main loop.
+    verdicts: dict[str, ReleaseVerdict] = {}
+    critical_min = spec.critical_min_update_age_days
+    if published_fn is not None and spec.critical_keywords and 0 <= critical_min < min_age:
+        fast_cutoff = now - timedelta(days=critical_min)
+        for tag in sorted(pending, key=version_key, reverse=True):
+            if ledger.tags[tag].first_seen > fast_cutoff:
+                continue
+            verdict = verdicts[tag] = _verdict(published_fn(tag))
+            if verdict.published is None:
+                notes.append(f"release check for {tag}: {verdict.why}; it waits the full period")
+            elif verdict.published and verdict.critical:
+                notes.append(
+                    f"fast lane: {tag} is marked critical ({verdict.critical_why}); "
+                    f"eligible after {_days(critical_min)} instead of {_days(min_age)}"
+                )
+                pending.remove(tag)
+                eligible.append(tag)
 
     eligible.sort(key=version_key, reverse=True)
     newest_label = max(release_tags, key=version_key)
@@ -682,7 +748,8 @@ def plan_update(
         upgrade = ancestor_fn(head, commit)
         if upgrade is True:
             if published_fn is not None:
-                published, why = published_fn(target)
+                verdict = verdicts.get(target) or _verdict(published_fn(target))
+                published, why = verdict.published, verdict.why
                 if published is None:
                     notes.append(f"release check: {why}")
                     return HermesPlan(
@@ -711,9 +778,14 @@ def plan_update(
                 )
                 reason += f" (Hermes cannot pin a release).{tail}"
             else:
+                lane = (
+                    " (marked critical, fast lane)"
+                    if verdicts.get(target) is not None and verdicts[target].critical
+                    and age < min_age else ""
+                )
                 reason = (
-                    f"{seen_phrase} is the newest release old enough and newer than the "
-                    f"installed {installed_label}; pinning the checkout to it.{tail}"
+                    f"{seen_phrase}{lane} is the newest release old enough and newer than "
+                    f"the installed {installed_label}; pinning the checkout to it.{tail}"
                 )
             return HermesPlan(
                 install=True, mode=spec.update_mode, target_tag=target, target_commit=commit,

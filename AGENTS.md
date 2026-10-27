@@ -168,7 +168,14 @@ and `hermes_tags.json`, the tag ledger).
   nothing is installed that night, said in the report. When a project
   you look after changes its versioning, the first symptom is a planner
   that is "waiting" with a straight face; a target that has not moved in
-  three weeks deserves a look at upstream, not trust.
+  three weeks deserves a look at upstream, not trust. The same GitHub
+  answer feeds the fast lane (operator's rule, 2026-10-27): a published
+  release whose name or notes carry a critical keyword (`security`,
+  `critical`, `cve-` by default) waits `HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS`
+  (1) instead of 7. It is deliberately a trade: release notes are free
+  text, so the floor, the publication requirement, the ancestry rule and
+  the report line are what bound it. Never let a keyword skip the
+  publication check or the floor.
 - **A LaunchAgent lives in one of two per-user launchd domains, and
   `launchctl print` only sees the one you name.** `gui/<uid>` holds what
   a logged-in desktop session loads; `user/<uid>` holds what an SSH or

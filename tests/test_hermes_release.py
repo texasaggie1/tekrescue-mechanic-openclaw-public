@@ -100,7 +100,9 @@ class Repo:
 
 
 def make_settings(repo: Repo, bin_path: Path, *, min_age: int = 7, mode: str = MODE_RELEASE_TAG,
-                  skip: tuple[str, ...] = (), release_check: str = "none") -> HermesSettings:
+                  skip: tuple[str, ...] = (), release_check: str = "none",
+                  critical_min_age: int = 1,
+                  critical_keywords: tuple[str, ...] = ("security", "critical", "cve-")) -> HermesSettings:
     # release_check defaults to none here: the fixture's origin is a local
     # path, so GitHub cannot vouch for its tags.
     return HermesSettings(
@@ -114,6 +116,8 @@ def make_settings(repo: Repo, bin_path: Path, *, min_age: int = 7, mode: str = M
         doctor_fix=True,
         gateway_restart_timeout_seconds=60,
         release_check=release_check,
+        critical_min_update_age_days=critical_min_age,
+        critical_keywords=critical_keywords,
     )
 
 
@@ -284,7 +288,7 @@ class PlanTests(HermesRepoTestCase):
             asked.append(tag)
             return (False, f"{tag} has no GitHub Release (a tag, not a release)") if tag == "v0.22.4" else (True, "ok")
 
-        plan = self.plan("c1", published_fn=check)
+        plan = self.plan("c1", published_fn=check, critical_keywords=())
         self.assertTrue(plan.install)
         self.assertEqual(plan.target_tag, "v0.22.3")
         self.assertEqual(asked, ["v0.22.4", "v0.22.3"])
@@ -324,6 +328,40 @@ class PlanTests(HermesRepoTestCase):
         self.assertEqual(plan.next_tag, "v0.22.5")
         self.assertEqual(len([n for n in plan.notes if "skipped" in n]), 2)
 
+    def test_critical_release_takes_the_fast_lane(self) -> None:
+        # v0.22.5 was first seen 10-03, one day before NOW: pending under the
+        # 7-day rule, eligible under the 1-day critical rule once its
+        # release notes say so.
+        def check(tag: str):
+            critical = tag == "v0.22.5"
+            return hermes_release.ReleaseVerdict(True, "ok", critical, "release notes mention 'security'" if critical else "")
+
+        plan = self.plan("c1", published_fn=check)
+        self.assertTrue(plan.install)
+        self.assertEqual(plan.target_tag, "v0.22.5")
+        self.assertIn("marked critical, fast lane", plan.reason)
+        self.assertTrue(any(note.startswith("fast lane: v0.22.5 is marked critical") for note in plan.notes))
+
+    def test_pending_release_that_is_not_critical_still_waits(self) -> None:
+        plan = self.plan("c1", published_fn=lambda tag: hermes_release.ReleaseVerdict(True, "ok"))
+        self.assertEqual(plan.target_tag, "v0.22.4")
+        self.assertNotIn("fast lane", plan.reason)
+
+    def test_fast_lane_needs_the_release_check_and_keywords(self) -> None:
+        self.assertEqual(self.plan("c1", published_fn=None).target_tag, "v0.22.4")
+        critical = lambda tag: hermes_release.ReleaseVerdict(True, "ok", True, "release notes mention 'security'")
+        self.assertEqual(self.plan("c1", published_fn=critical, critical_keywords=()).target_tag, "v0.22.4")
+        self.assertEqual(self.plan("c1", published_fn=critical, critical_min_age=7).target_tag, "v0.22.4")
+
+    def test_unknown_verdict_on_a_pending_tag_does_not_block_the_night(self) -> None:
+        def check(tag: str):
+            return hermes_release.ReleaseVerdict(None, "HTTP 403") if tag == "v0.22.5" else hermes_release.ReleaseVerdict(True, "ok")
+
+        plan = self.plan("c1", published_fn=check)
+        self.assertTrue(plan.install)
+        self.assertEqual(plan.target_tag, "v0.22.4")
+        self.assertIn("release check for v0.22.5: HTTP 403; it waits the full period", plan.notes)
+
     def test_release_check_is_not_asked_when_nothing_would_be_pinned(self) -> None:
         asked: list[str] = []
 
@@ -331,9 +369,12 @@ class PlanTests(HermesRepoTestCase):
             asked.append(tag)
             return True, "ok"
 
-        self.assertFalse(self.plan("c3", published_fn=check).install)  # current
-        self.assertFalse(self.plan("c6", published_fn=check).install)  # ahead
+        self.assertFalse(self.plan("c3", published_fn=check, critical_keywords=()).install)  # current
+        self.assertFalse(self.plan("c6", published_fn=check, critical_keywords=()).install)  # ahead
         self.assertEqual(asked, [])
+        # With the fast lane on, only the tag inside its window is asked.
+        self.assertFalse(self.plan("c6", published_fn=check).install)
+        self.assertEqual(asked, ["v0.22.5"])
 
     def test_pins_newest_tag_old_enough_when_head_is_behind(self) -> None:
         # 2026-10-04 minus 7 days is 09-27: v0.22.4 qualifies, v0.22.5 (10-03) does not.
@@ -434,9 +475,26 @@ class PublicationCheckTests(unittest.TestCase):
         def boom(url, headers, timeout):
             raise OSError("no route to host")
 
-        verdict, why = hermes_release.published_release("o/r", "v0.22.4", get=boom)
-        self.assertIsNone(verdict)
-        self.assertIn("could not be reached", why)
+        verdict = hermes_release.published_release("o/r", "v0.22.4", get=boom)
+        self.assertIsNone(verdict.published)
+        self.assertIn("could not be reached", verdict.why)
+
+    def test_critical_keywords_in_name_or_notes(self) -> None:
+        keywords = ("security", "critical", "cve-")
+        base = {"tag_name": "v0.22.4", "draft": False, "prerelease": False}
+        for release, expected in (
+            ({**base, "name": "v0.22.4", "body": "Routine fixes."}, False),
+            ({**base, "name": "v0.22.4", "body": "Fixes a SECURITY issue in the gateway."}, True),
+            ({**base, "name": "Critical hotfix", "body": None}, True),
+            ({**base, "name": "v0.22.4", "body": "Addresses CVE-2026-1234."}, True),
+        ):
+            verdict = hermes_release.published_release("o/r", "v0.22.4", keywords=keywords, get=self.answer(200, release))
+            self.assertTrue(verdict.published)
+            self.assertEqual(verdict.critical, expected, release)
+        off = hermes_release.published_release(
+            "o/r", "v0.22.4", keywords=(), get=self.answer(200, {**base, "name": "Critical security fix"}),
+        )
+        self.assertFalse(off.critical)
 
     def test_request_shape(self) -> None:
         seen = {}
@@ -469,10 +527,10 @@ class ReleaseCheckerTests(HermesRepoTestCase):
     def test_non_github_origin_cannot_be_verified(self) -> None:
         check = hermes_release.release_checker(make_settings(self.repo, self.bin, release_check="github"))
         self.assertIsNotNone(check)
-        verdict, why = check("v0.22.4")
-        self.assertIsNone(verdict)
-        self.assertIn("not a github.com repository", why)
-        self.assertIn("HERMES_RELEASE_CHECK=none", why)
+        verdict = check("v0.22.4")
+        self.assertIsNone(verdict.published)
+        self.assertIn("not a github.com repository", verdict.why)
+        self.assertIn("HERMES_RELEASE_CHECK=none", verdict.why)
         # And the end-to-end plan then installs nothing, loudly.
         self.checkout("v0.22.2")
         plan = scan_and_plan(make_settings(self.repo, self.bin, release_check="github"), now=NOW, ledger_path=self.ledger_path)

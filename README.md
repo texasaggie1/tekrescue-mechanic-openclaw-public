@@ -216,7 +216,9 @@ up changes on their next scheduled invocation.
 | `HERMES_SOURCE_DIR` | `~/.hermes/hermes-agent` | The git checkout a source install runs from. A Desktop bundle has none and cannot be pinned. |
 | `HERMES_UPDATE_MODE` | `release-tag` | `release-tag` pins the checkout to a week-old release and rebuilds with `hermes pm install`. `hermes-update` waits the same period, then runs `hermes update --yes`, which installs the latest published stable release (or the tip of the channel you name). |
 | `HERMES_UPDATE_CHANNEL` | empty | `hermes-update` mode only: `--channel` to pass (`stable`, `canary`, `main`). Empty follows what Hermes has saved, which on an official checkout is `stable`. |
-| `HERMES_RELEASE_CHECK` | `github` | `github`: a tag is pinned only when GitHub says it is a published, non-prerelease Release (one anonymous request a night). `none`: pin by tag alone. |
+| `HERMES_RELEASE_CHECK` | `github` | `github`: a tag is pinned only when GitHub says it is a published, non-prerelease Release (a few anonymous requests a night). `none`: pin by tag alone. |
+| `HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS` | `1` | The fast lane: a published release whose GitHub name or notes contain one of the critical keywords waits only this long instead of the full period. Needs `HERMES_RELEASE_CHECK=github`. |
+| `HERMES_CRITICAL_KEYWORDS` | `security,critical,cve-` | Case-insensitive words that mark a release critical. Set it empty to turn the fast lane off. |
 | `HERMES_MIN_UPDATE_AGE_DAYS` | `MIN_UPDATE_AGE_DAYS` | Overrides the shared waiting period for Hermes only. |
 | `HERMES_SKIP_TAGS` | empty | Comma-separated release tags Mechanic must never pin to. |
 | `HERMES_DOCTOR_FIX` | `true` | Run `hermes doctor --fix` after an update (safe config migrations, unattended). `false` runs read-only `hermes doctor`. |
@@ -340,7 +342,15 @@ So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
    whether that tag is a published, non-prerelease Release, the same
    test Hermes applies: a tag without a release is skipped for the next
    eligible one, and when GitHub cannot be asked nothing is installed
-   that night (`HERMES_RELEASE_CHECK=none` turns this off).
+   that night (`HERMES_RELEASE_CHECK=none` turns this off). The same
+   answer carries the release notes: a published release that mentions
+   `security`, `critical`, or a CVE takes the fast lane and waits one
+   day instead of seven (`HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS`,
+   `HERMES_CRITICAL_KEYWORDS`). Release notes are free text, so treat
+   the fast lane as a trade: a hijacked account could write the word
+   "security" to shorten its own wait to a day. Every other rule still
+   applies to it, the morning report names it, and an empty keyword
+   list turns it off.
 5. Takes its own archive of `~/.hermes` (minus the checkout, the package
    manager's stores, caches, browser profiles, and Hermes's own
    state-snapshots, the same list `hermes backup` skips). The SQLite

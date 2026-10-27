@@ -63,6 +63,8 @@ _MECHANIC_ENV_VARS = (
     "HERMES_DOCTOR_FIX",
     "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS",
     "HERMES_RELEASE_CHECK",
+    "HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS",
+    "HERMES_CRITICAL_KEYWORDS",
     "UPDATE_TIME",
     "MIN_UPDATE_AGE_DAYS",
     "SUPERVISOR_INTERVAL_MINUTES",
@@ -151,7 +153,11 @@ class HermesSettings:
     installs the latest published stable release at that moment, or the
     tip of the channel named). `release_check` is `github` (a tag is pinned
     only when it is a published, non-prerelease GitHub Release, the test
-    Hermes itself applies) or `none`. See hermes_release.py.
+    Hermes itself applies) or `none`. A published release whose GitHub
+    name or notes contain one of `critical_keywords` becomes eligible
+    after `critical_min_update_age_days` instead of the full waiting
+    period (the fast lane); an empty keyword list disables it. See
+    hermes_release.py.
     """
 
     bin_path: Path
@@ -167,6 +173,8 @@ class HermesSettings:
     #: watchdog, and two healers fighting over one service helps nobody.
     gateway_autoheal: bool = False
     release_check: str = "github"
+    critical_min_update_age_days: int = 1
+    critical_keywords: tuple[str, ...] = ("security", "critical", "cve-")
 
 
 @dataclass(frozen=True)
@@ -359,6 +367,11 @@ def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
             f"HERMES_RELEASE_CHECK must be one of {', '.join(VALID_HERMES_RELEASE_CHECKS)}. "
             f"Got: {release_check!r}."
         )
+    keywords_raw = os.environ.get("HERMES_CRITICAL_KEYWORDS")
+    if keywords_raw is None:
+        critical_keywords: tuple[str, ...] = ("security", "critical", "cve-")
+    else:
+        critical_keywords = tuple(k.strip().lower() for k in keywords_raw.split(",") if k.strip())
     return HermesSettings(
         bin_path=Path(bin_raw).expanduser(),
         home=home,
@@ -375,6 +388,10 @@ def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
         ),
         gateway_autoheal=_env_bool("HERMES_GATEWAY_AUTOHEAL", default=False),
         release_check=release_check,
+        critical_min_update_age_days=_env_int(
+            "HERMES_CRITICAL_MIN_UPDATE_AGE_DAYS", default=1, min_value=0
+        ),
+        critical_keywords=critical_keywords,
     )
 
 
