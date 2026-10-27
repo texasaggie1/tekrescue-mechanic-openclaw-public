@@ -214,8 +214,9 @@ up changes on their next scheduled invocation.
 | `HERMES_BIN_PATH` | `~/.local/bin/hermes` | The `hermes` launcher. |
 | `HERMES_HOME` | `~/.hermes` | Hermes's data directory (config, state, skills, sessions). Mechanic snapshots it. |
 | `HERMES_SOURCE_DIR` | `~/.hermes/hermes-agent` | The git checkout a source install runs from. A Desktop bundle has none and cannot be pinned. |
-| `HERMES_UPDATE_MODE` | `release-tag` | `release-tag` pins the checkout to a week-old release and rebuilds with `hermes pm install`. `hermes-update` waits the same period, then runs `hermes update --yes`, which installs the tip of the channel. |
-| `HERMES_UPDATE_CHANNEL` | empty | `hermes-update` mode only: `--channel` to pass (`stable`, `canary`, `main`). |
+| `HERMES_UPDATE_MODE` | `release-tag` | `release-tag` pins the checkout to a week-old release and rebuilds with `hermes pm install`. `hermes-update` waits the same period, then runs `hermes update --yes`, which installs the latest published stable release (or the tip of the channel you name). |
+| `HERMES_UPDATE_CHANNEL` | empty | `hermes-update` mode only: `--channel` to pass (`stable`, `canary`, `main`). Empty follows what Hermes has saved, which on an official checkout is `stable`. |
+| `HERMES_RELEASE_CHECK` | `github` | `github`: a tag is pinned only when GitHub says it is a published, non-prerelease Release (one anonymous request a night). `none`: pin by tag alone. |
 | `HERMES_MIN_UPDATE_AGE_DAYS` | `MIN_UPDATE_AGE_DAYS` | Overrides the shared waiting period for Hermes only. |
 | `HERMES_SKIP_TAGS` | empty | Comma-separated release tags Mechanic must never pin to. |
 | `HERMES_DOCTOR_FIX` | `true` | Run `hermes doctor --fix` after an update (safe config migrations, unattended). `false` runs read-only `hermes doctor`. |
@@ -307,12 +308,13 @@ the newest release the night it lands, set it to `0`.
 ## Hermes
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a source
-install: a git checkout at `~/.hermes/hermes-agent` that tracks `main`,
-with your data in `~/.hermes`. Its own updater, `hermes update`,
-fast-forwards to the tip of `main` and has no way to ask for an older
-release. The maintainers do mark releases, though: plain tags such as
-`v2026.9.24` land on `main` every few days, carry the date that
-`hermes --version` prints, and run the project's release-gate tests.
+install: a git checkout at `~/.hermes/hermes-agent`, with your data in
+`~/.hermes`. Since Hermes v0.22.0 (October 2026) a release is a published
+GitHub Release with a `vX.Y.Z` tag, such as `v0.22.5`; the dated tags of
+the earlier scheme (`v2026.9.24`) are retired. Its own updater, `hermes
+update`, follows the latest published stable release, only ever forward,
+and has no way to ask for an older one. Canary builds are cut daily as
+prereleases.
 
 So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
 
@@ -334,7 +336,11 @@ So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
    tag. Already there means "current". Ahead of it (someone ran
    `hermes update`, or the checkout sits on `main`'s tip) means "wait for
    a newer tag to age"; Mechanic never downgrades. Anything else means
-   "diverged, leaving it alone".
+   "diverged, leaving it alone". Before pinning, Mechanic asks GitHub
+   whether that tag is a published, non-prerelease Release, the same
+   test Hermes applies: a tag without a release is skipped for the next
+   eligible one, and when GitHub cannot be asked nothing is installed
+   that night (`HERMES_RELEASE_CHECK=none` turns this off).
 5. Takes its own archive of `~/.hermes` (minus the checkout, the package
    manager's stores, caches, browser profiles, and Hermes's own
    state-snapshots, the same list `hermes backup` skips). The SQLite
@@ -355,11 +361,11 @@ puts both your data and the code back.
 
 `HERMES_UPDATE_MODE=hermes-update` keeps Hermes's own updater instead:
 the same waiting period on the newest tag, then `hermes update --yes`,
-which installs the tip of the configured channel. A trigger delay, not
-a pin, but every step is Hermes-supported. Nous has designed a `stable`
-channel that would make `--channel stable` a real pin; as of October
-2026 its published record does not exist yet, so leave
-`HERMES_UPDATE_CHANNEL` empty until it does.
+which installs the latest published stable release at that moment (or
+the tip of the channel you name in `HERMES_UPDATE_CHANNEL`). That can be
+newer than the tag that aged, so it is a trigger delay rather than a
+pin, but every step of it is Hermes-supported, including the launcher
+and product rebuilds Hermes's updater does after the checkout moves.
 
 Two things to know. First, this is a path Nous does not test for you,
 so run the first nightly supervised: `mechanic plan`, then
@@ -436,8 +442,8 @@ would do and why, without changing anything:
 ```
 == Hermes ==
   health:   healthy (2026.9.7, exit 0, 11 ms)
-  Waiting period (HERMES_MIN_UPDATE_AGE_DAYS=7, mode release-tag): v2026.9.21 (first seen 2026-09-21, 13 days ago) is the newest release old enough and newer than the installed v2026.9.7; pinning the checkout to it. Next: v2026.10.3 becomes eligible 2026-10-10T10:05Z.
-  Tonight: snapshot, install v2026.9.21, doctor, verify.
+  Waiting period (HERMES_MIN_UPDATE_AGE_DAYS=7, mode release-tag): v0.22.2 (first seen 2026-10-16, 11 days ago) is the newest release old enough and newer than the installed v2026.9.7; pinning the checkout to it. Next: v2026.10.3 becomes eligible 2026-10-10T10:05Z.
+  Tonight: snapshot, install v0.22.2, doctor, verify.
 ```
 
 Other useful commands:
@@ -719,6 +725,16 @@ checkout is on the tip of `main`, past every week-old tag. Mechanic
 leaves it there and waits for the next tag to age. If you want back on
 a pinned release now, `mechanic restore --target hermes last-known-good`
 puts the code (and data) back where Mechanic last verified it.
+
+### Hermes: "waiting" for weeks while releases kept shipping
+
+Mechanic 0.2.0 ranked Hermes tags by version number. When Hermes moved
+from dated tags (`v2026.9.24`) to semver releases (`v0.22.0` and up) in
+October 2026, the old dated tag outranked every new one and every
+nightly concluded the checkout was "already ahead" and waited. 0.2.1
+counts only Hermes's own stable tag shape as a release. If you are on
+0.2.0, pull, then `mechanic plan --target hermes` should name a `v0.x`
+tag.
 
 ### Hermes: "on different lines of history"
 

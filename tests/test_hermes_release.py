@@ -100,7 +100,9 @@ class Repo:
 
 
 def make_settings(repo: Repo, bin_path: Path, *, min_age: int = 7, mode: str = MODE_RELEASE_TAG,
-                  skip: tuple[str, ...] = ()) -> HermesSettings:
+                  skip: tuple[str, ...] = (), release_check: str = "none") -> HermesSettings:
+    # release_check defaults to none here: the fixture's origin is a local
+    # path, so GitHub cannot vouch for its tags.
     return HermesSettings(
         bin_path=bin_path,
         home=repo.root / "home",
@@ -111,6 +113,7 @@ def make_settings(repo: Repo, bin_path: Path, *, min_age: int = 7, mode: str = M
         skip_tags=skip,
         doctor_fix=True,
         gateway_restart_timeout_seconds=60,
+        release_check=release_check,
     )
 
 
@@ -131,12 +134,13 @@ def write_fake_hermes(path: Path, *, pm_install_exit: int = 0) -> Path:
 class HermesRepoTestCase(unittest.TestCase):
     """Builds this history on origin, dates in September 2026:
 
-        c0 (09-01)  tag v2026.9.1
-        c1 (09-07)  tag v2026.9.7
-        c2 (09-14)  tag v2026.9.14
-        c3 (09-21)  tag v2026.9.21 and v2026.9.21-rc.1 (ignored shape)
+        c0 (09-01)  tag v0.22.1, plus v2026.9.1 (the retired dated shape,
+                    numerically the largest tag of all: must be ignored)
+        c1 (09-07)  tag v0.22.2
+        c2 (09-14)  tag v0.22.3
+        c3 (09-21)  tag v0.22.4 and v0.22.4-rc.1 (ignored shape)
         c4 (09-28)  v0.21.4+canary.20260928T070000Z (ignored shape)
-        c5 (10-03)  tag v2026.10.3
+        c5 (10-03)  tag v0.22.5
         c6 (10-04)  untagged tip of main
     """
 
@@ -145,13 +149,14 @@ class HermesRepoTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.repo = Repo(self.tmp)
         r = self.repo
-        r.commit("c0", "2026-09-01T10:00:00Z"); r.tag("v2026.9.1", "2026-09-01T10:05:00Z")
-        r.commit("c1", "2026-09-07T10:00:00Z"); r.tag("v2026.9.7", "2026-09-07T10:05:00Z")
-        r.commit("c2", "2026-09-14T10:00:00Z"); r.tag("v2026.9.14", "2026-09-14T10:05:00Z")
-        r.commit("c3", "2026-09-21T10:00:00Z"); r.tag("v2026.9.21", "2026-09-21T10:05:00Z")
-        r.tag("v2026.9.21-rc.1", "2026-09-20T10:05:00Z")
+        r.commit("c0", "2026-09-01T10:00:00Z"); r.tag("v0.22.1", "2026-09-01T10:05:00Z")
+        r.tag("v2026.9.1", "2026-09-01T10:06:00Z")  # retired dated scheme
+        r.commit("c1", "2026-09-07T10:00:00Z"); r.tag("v0.22.2", "2026-09-07T10:05:00Z")
+        r.commit("c2", "2026-09-14T10:00:00Z"); r.tag("v0.22.3", "2026-09-14T10:05:00Z")
+        r.commit("c3", "2026-09-21T10:00:00Z"); r.tag("v0.22.4", "2026-09-21T10:05:00Z")
+        r.tag("v0.22.4-rc.1", "2026-09-20T10:05:00Z")
         r.commit("c4", "2026-09-28T10:00:00Z"); r.tag("v0.21.4+canary.20260928T070000Z", "2026-09-28T10:05:00Z", annotated=False)
-        r.commit("c5", "2026-10-03T10:00:00Z"); r.tag("v2026.10.3", "2026-10-03T10:05:00Z")
+        r.commit("c5", "2026-10-03T10:00:00Z"); r.tag("v0.22.5", "2026-10-03T10:05:00Z")
         r.commit("c6", "2026-10-04T10:00:00Z")
         r.push()
         r.clone_install()
@@ -169,33 +174,38 @@ class GitPlumbingTests(HermesRepoTestCase):
     def test_upstream_tags_are_peeled_to_commits(self) -> None:
         tags, error = list_upstream_tags(self.settings)
         self.assertIsNone(error)
-        self.assertEqual(tags["v2026.9.7"], self.repo.commits["c1"])
-        self.assertEqual(tags["v2026.9.21"], self.repo.commits["c3"])
+        self.assertEqual(tags["v0.22.2"], self.repo.commits["c1"])
+        self.assertEqual(tags["v0.22.4"], self.repo.commits["c3"])
         self.assertIn("v0.21.4+canary.20260928T070000Z", tags)
 
     def test_fetch_and_dates(self) -> None:
         self.assertIsNone(fetch_release_tags(self.settings))
         dates = local_tag_dates(self.settings)
-        self.assertEqual(dates["v2026.9.7"].date().isoformat(), "2026-09-07")
+        self.assertEqual(dates["v0.22.2"].date().isoformat(), "2026-09-07")
         self.assertIn("v0.21.4+canary.20260928T070000Z", dates)  # mirrored; the shape filter runs later
-        self.assertNotIn("v2026.9.21", git("tag", "-l", "mechanic*", cwd=self.repo.source))
+        self.assertNotIn("v0.22.4", git("tag", "-l", "mechanic*", cwd=self.repo.source))
 
     def test_release_tag_shape(self) -> None:
-        self.assertTrue(RELEASE_TAG_RE.match("v2026.9.21"))
-        self.assertFalse(RELEASE_TAG_RE.match("v2026.9.21-rc.1"))
+        # Hermes's own stable shape: the retired dated tags are not releases.
+        self.assertTrue(RELEASE_TAG_RE.match("v0.22.4"))
+        self.assertTrue(RELEASE_TAG_RE.match("v1.0.0"))
+        self.assertTrue(RELEASE_TAG_RE.match("v999.0.10"))
+        self.assertFalse(RELEASE_TAG_RE.match("v2026.9.24"))
+        self.assertFalse(RELEASE_TAG_RE.match("v0.22.4-rc.1"))
         self.assertFalse(RELEASE_TAG_RE.match("v0.21.4+canary.20260928T070000Z"))
+        self.assertFalse(RELEASE_TAG_RE.match("v01.2.3"))
 
     def test_describe_and_ancestry(self) -> None:
-        self.checkout("v2026.9.14")
-        self.assertEqual(describe_head(self.settings), "v2026.9.14")
+        self.checkout("v0.22.3")
+        self.assertEqual(describe_head(self.settings), "v0.22.3")
         self.assertEqual(head_commit(self.settings), self.repo.commits["c2"])
         self.assertTrue(is_ancestor(self.settings, self.repo.commits["c2"], self.repo.commits["c3"]))
         self.assertFalse(is_ancestor(self.settings, self.repo.commits["c3"], self.repo.commits["c2"]))
         self.checkout("main")
-        self.assertTrue(describe_head(self.settings).startswith("v2026.10.3+1.g"))
+        self.assertTrue(describe_head(self.settings).startswith("v0.22.5+1.g"))
         # The canary and rc tags exist on this history but must never be the label.
         git("tag", "v0.99.0+canary.20261004T000000Z", "main", cwd=self.repo.source)
-        self.assertTrue(describe_head(self.settings).startswith("v2026.10.3+1.g"))
+        self.assertTrue(describe_head(self.settings).startswith("v0.22.5+1.g"))
 
 
 class LedgerTests(HermesRepoTestCase):
@@ -205,29 +215,29 @@ class LedgerTests(HermesRepoTestCase):
         dates = local_tag_dates(self.settings)
         ledger = observe_tags(TagLedger(), upstream, dates, now=NOW)
         self.assertTrue(ledger.bootstrapped)
-        self.assertEqual(ledger.tags["v2026.9.7"].first_seen.date().isoformat(), "2026-09-07")
-        self.assertNotIn("v2026.9.21-rc.1", ledger.tags)
+        self.assertEqual(ledger.tags["v0.22.2"].first_seen.date().isoformat(), "2026-09-07")
+        self.assertNotIn("v0.22.4-rc.1", ledger.tags)
 
         # A tag that appears later is dated by first sight, whatever it claims.
         self.repo.commit("c7", "2026-10-05T10:00:00Z")
-        self.repo.tag("v2026.10.5", "2026-09-01T00:00:00Z")  # backdated on purpose
+        self.repo.tag("v0.22.6", "2026-09-01T00:00:00Z")  # backdated on purpose
         self.repo.push()
         later = NOW + timedelta(days=1)
         upstream, _ = list_upstream_tags(self.settings)
         fetch_release_tags(self.settings)
         ledger = observe_tags(ledger, upstream, local_tag_dates(self.settings), now=later)
-        self.assertEqual(ledger.tags["v2026.10.5"].first_seen, later)
+        self.assertEqual(ledger.tags["v0.22.6"].first_seen, later)
 
     def test_moved_tag_is_flagged_and_kept(self) -> None:
         upstream, _ = list_upstream_tags(self.settings)
         fetch_release_tags(self.settings)
         ledger = observe_tags(TagLedger(), upstream, local_tag_dates(self.settings), now=NOW)
-        original = ledger.tags["v2026.9.14"].commit
-        self.repo.move_tag("v2026.9.14", "c5")
+        original = ledger.tags["v0.22.3"].commit
+        self.repo.move_tag("v0.22.3", "c5")
         upstream, _ = list_upstream_tags(self.settings)
         self.assertIsNone(fetch_release_tags(self.settings))  # mirrored into Mechanic's namespace
         ledger = observe_tags(ledger, upstream, local_tag_dates(self.settings), now=NOW)
-        record = ledger.tags["v2026.9.14"]
+        record = ledger.tags["v0.22.3"]
         self.assertTrue(record.moved)
         self.assertEqual(record.commit, original)
         self.assertEqual(record.moved_to, self.repo.commits["c5"])
@@ -248,22 +258,90 @@ class PlanTests(HermesRepoTestCase):
         fetch_release_tags(self.settings)
         return observe_tags(TagLedger(), upstream, local_tag_dates(self.settings), now=NOW), upstream
 
-    def plan(self, head_label: str, **kw):
+    def plan(self, head_label: str, published_fn=None, **kw):
         ledger, upstream = self.ledger()
         settings = make_settings(self.repo, self.bin, **kw)
         head = self.repo.commits[head_label]
         return plan_update(
             settings, ledger=ledger, upstream=upstream, head=head, installed_label=head_label,
             now=NOW, ancestor_fn=lambda a, b: is_ancestor(self.settings, a, b),
+            published_fn=published_fn,
         )
 
+    def test_dated_tags_are_not_releases(self) -> None:
+        # v2026.9.1 outranks every semver tag numerically; v0.2.0 would have
+        # chosen it and then reported the checkout "already ahead" forever.
+        ledger, upstream = self.ledger()
+        self.assertIn("v2026.9.1", upstream)
+        self.assertNotIn("v2026.9.1", ledger.tags)
+        plan = self.plan("c1")
+        self.assertEqual(plan.target_tag, "v0.22.4")
+
+    def test_unpublished_release_is_skipped_for_the_next_one(self) -> None:
+        asked: list[str] = []
+
+        def check(tag: str):
+            asked.append(tag)
+            return (False, f"{tag} has no GitHub Release (a tag, not a release)") if tag == "v0.22.4" else (True, "ok")
+
+        plan = self.plan("c1", published_fn=check)
+        self.assertTrue(plan.install)
+        self.assertEqual(plan.target_tag, "v0.22.3")
+        self.assertEqual(asked, ["v0.22.4", "v0.22.3"])
+        self.assertIn("v0.22.4 skipped: v0.22.4 has no GitHub Release (a tag, not a release)", plan.notes)
+
+    def test_release_check_failure_installs_nothing(self) -> None:
+        plan = self.plan("c1", published_fn=lambda tag: (None, "GitHub API refused the request (HTTP 403)"))
+        self.assertFalse(plan.install)
+        self.assertEqual(plan.error, "release check failed")
+        self.assertIn("could not confirm that v0.22.4 is a published release", plan.reason)
+        self.assertIn("installing nothing tonight", plan.reason)
+        self.assertTrue(any(note.startswith("release check: GitHub API refused") for note in plan.notes))
+
+    def test_unpublished_newer_tags_fall_back_to_the_tag_head_is_on(self) -> None:
+        # HEAD sits on v0.22.2; v0.22.4 and v0.22.3 are tags without a
+        # release. Mechanic reports "current" and names both skips.
+        plan = self.plan("c1", published_fn=lambda tag: (False, f"{tag} is a prerelease"))
+        self.assertFalse(plan.install)
+        self.assertIsNone(plan.error)
+        self.assertIn("already v0.22.2", plan.reason)
+        self.assertEqual(len([n for n in plan.notes if "skipped" in n]), 2)
+
+    def test_every_eligible_tag_unpublished_means_wait(self) -> None:
+        # Only newer tags exist for this HEAD, none of them released yet.
+        ledger, upstream = self.ledger()
+        for old in ("v0.22.1", "v0.22.2"):
+            del ledger.tags[old]
+            del upstream[old]
+        plan = plan_update(
+            self.settings, ledger=ledger, upstream=upstream, head=self.repo.commits["c1"],
+            installed_label="c1", now=NOW, ancestor_fn=lambda a, b: is_ancestor(self.settings, a, b),
+            published_fn=lambda tag: (False, f"{tag} is a prerelease"),
+        )
+        self.assertFalse(plan.install)
+        self.assertIsNone(plan.error)
+        self.assertIn("no release old enough is a published GitHub Release yet", plan.reason)
+        self.assertEqual(plan.next_tag, "v0.22.5")
+        self.assertEqual(len([n for n in plan.notes if "skipped" in n]), 2)
+
+    def test_release_check_is_not_asked_when_nothing_would_be_pinned(self) -> None:
+        asked: list[str] = []
+
+        def check(tag: str):
+            asked.append(tag)
+            return True, "ok"
+
+        self.assertFalse(self.plan("c3", published_fn=check).install)  # current
+        self.assertFalse(self.plan("c6", published_fn=check).install)  # ahead
+        self.assertEqual(asked, [])
+
     def test_pins_newest_tag_old_enough_when_head_is_behind(self) -> None:
-        # 2026-10-04 minus 7 days is 09-27: v2026.9.21 qualifies, v2026.10.3 (10-03) does not.
+        # 2026-10-04 minus 7 days is 09-27: v0.22.4 qualifies, v0.22.5 (10-03) does not.
         plan = self.plan("c1")
         self.assertTrue(plan.install)
-        self.assertEqual(plan.target_tag, "v2026.9.21")
+        self.assertEqual(plan.target_tag, "v0.22.4")
         self.assertEqual(plan.target_commit, self.repo.commits["c3"])
-        self.assertEqual(plan.next_tag, "v2026.10.3")
+        self.assertEqual(plan.next_tag, "v0.22.5")
         self.assertEqual(plan.next_eligible_at.date().isoformat(), "2026-10-10")
         self.assertIn("pinning the checkout", plan.reason)
 
@@ -271,25 +349,25 @@ class PlanTests(HermesRepoTestCase):
         plan = self.plan("c3")
         self.assertFalse(plan.install)
         self.assertIsNone(plan.error)
-        self.assertIn("already v2026.9.21", plan.reason)
-        self.assertIn("Next: v2026.10.3 becomes eligible 2026-10-10", plan.reason)
+        self.assertIn("already v0.22.4", plan.reason)
+        self.assertIn("Next: v0.22.5 becomes eligible 2026-10-10", plan.reason)
 
     def test_never_downgrades_when_head_is_ahead(self) -> None:
         plan = self.plan("c6")  # tip of main, past every tag
         self.assertFalse(plan.install)
         self.assertIsNone(plan.error)
-        self.assertIn("already ahead of v2026.9.21", plan.reason)
+        self.assertIn("already ahead of v0.22.4", plan.reason)
         self.assertIn("never downgrades", plan.reason)
 
     def test_skip_list_moves_to_the_next_release(self) -> None:
-        plan = self.plan("c1", skip=("v2026.9.21",))
+        plan = self.plan("c1", skip=("v0.22.4",))
         self.assertTrue(plan.install)
-        self.assertEqual(plan.target_tag, "v2026.9.14")
-        self.assertIn("v2026.9.21 skipped (HERMES_SKIP_TAGS)", plan.notes)
+        self.assertEqual(plan.target_tag, "v0.22.3")
+        self.assertIn("v0.22.4 skipped (HERMES_SKIP_TAGS)", plan.notes)
 
     def test_moved_tag_is_never_installed(self) -> None:
         ledger, upstream = self.ledger()
-        self.repo.move_tag("v2026.9.21", "c6")
+        self.repo.move_tag("v0.22.4", "c6")
         upstream, _ = list_upstream_tags(self.settings)
         fetch_release_tags(self.settings)
         ledger = observe_tags(ledger, upstream, local_tag_dates(self.settings), now=NOW)
@@ -297,12 +375,12 @@ class PlanTests(HermesRepoTestCase):
             self.settings, ledger=ledger, upstream=upstream, head=self.repo.commits["c1"],
             installed_label="c1", now=NOW, ancestor_fn=lambda a, b: is_ancestor(self.settings, a, b),
         )
-        self.assertEqual(plan.target_tag, "v2026.9.14")
+        self.assertEqual(plan.target_tag, "v0.22.3")
         self.assertTrue(any("MOVED" in note for note in plan.notes))
 
     def test_zero_days_takes_the_newest_tag(self) -> None:
         plan = self.plan("c1", min_age=0)
-        self.assertEqual(plan.target_tag, "v2026.10.3")
+        self.assertEqual(plan.target_tag, "v0.22.5")
 
     def test_hermes_update_mode_says_it_installs_the_tip(self) -> None:
         plan = self.plan("c1", mode=MODE_HERMES_UPDATE)
@@ -327,13 +405,88 @@ class PlanTests(HermesRepoTestCase):
         self.assertEqual(plan.error, "checkout diverged")
 
 
+class PublicationCheckTests(unittest.TestCase):
+    """GitHub answers, parsed the way Hermes's own updater parses them."""
+
+    @staticmethod
+    def answer(status: int, body=None, *, broken: bool = False):
+        class Response:
+            status_code = status
+
+            def json(self):
+                if broken:
+                    raise ValueError("not json")
+                return body
+
+        return lambda url, headers, timeout: Response()
+
+    def test_published_release_verdicts(self) -> None:
+        ok = {"tag_name": "v0.22.4", "draft": False, "prerelease": False}
+        self.assertEqual(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(200, ok))[0], True)
+        self.assertEqual(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(200, {**ok, "prerelease": True}))[0], False)
+        self.assertEqual(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(200, {**ok, "draft": True}))[0], False)
+        self.assertEqual(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(404))[0], False)
+        self.assertIsNone(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(403))[0])
+        self.assertIsNone(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(500))[0])
+        self.assertIsNone(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(200, {**ok, "tag_name": "v0.22.5"}))[0])
+        self.assertIsNone(hermes_release.published_release("o/r", "v0.22.4", get=self.answer(200, broken=True))[0])
+
+        def boom(url, headers, timeout):
+            raise OSError("no route to host")
+
+        verdict, why = hermes_release.published_release("o/r", "v0.22.4", get=boom)
+        self.assertIsNone(verdict)
+        self.assertIn("could not be reached", why)
+
+    def test_request_shape(self) -> None:
+        seen = {}
+
+        def get(url, headers, timeout):
+            seen.update(url=url, headers=headers, timeout=timeout)
+            return self.answer(404)(url, headers, timeout)
+
+        hermes_release.published_release("NousResearch/hermes-agent", "v0.22.4", get=get)
+        self.assertEqual(seen["url"], "https://api.github.com/repos/NousResearch/hermes-agent/releases/tags/v0.22.4")
+        self.assertTrue(seen["headers"]["User-Agent"].startswith("tekrescue-mechanic/"))
+        self.assertEqual(seen["headers"]["Accept"], "application/vnd.github+json")
+
+    def test_repository_from_url(self) -> None:
+        for url in (
+            "https://github.com/NousResearch/hermes-agent.git",
+            "https://github.com/NousResearch/hermes-agent",
+            "git@github.com:NousResearch/hermes-agent.git",
+            "ssh://git@github.com/NousResearch/hermes-agent",
+        ):
+            self.assertEqual(hermes_release.repository_from_url(url), "NousResearch/hermes-agent", url)
+        self.assertIsNone(hermes_release.repository_from_url("https://gitlab.com/x/y.git"))
+        self.assertIsNone(hermes_release.repository_from_url("/Users/me/origin.git"))
+
+
+class ReleaseCheckerTests(HermesRepoTestCase):
+    def test_disabled_means_no_checker(self) -> None:
+        self.assertIsNone(hermes_release.release_checker(make_settings(self.repo, self.bin, release_check="none")))
+
+    def test_non_github_origin_cannot_be_verified(self) -> None:
+        check = hermes_release.release_checker(make_settings(self.repo, self.bin, release_check="github"))
+        self.assertIsNotNone(check)
+        verdict, why = check("v0.22.4")
+        self.assertIsNone(verdict)
+        self.assertIn("not a github.com repository", why)
+        self.assertIn("HERMES_RELEASE_CHECK=none", why)
+        # And the end-to-end plan then installs nothing, loudly.
+        self.checkout("v0.22.2")
+        plan = scan_and_plan(make_settings(self.repo, self.bin, release_check="github"), now=NOW, ledger_path=self.ledger_path)
+        self.assertFalse(plan.install)
+        self.assertEqual(plan.error, "release check failed")
+
+
 class ScanAndApplyTests(HermesRepoTestCase):
     def test_scan_and_plan_end_to_end_writes_the_ledger(self) -> None:
-        self.checkout("v2026.9.7")
+        self.checkout("v0.22.2")
         plan = scan_and_plan(self.settings, now=NOW, ledger_path=self.ledger_path)
         self.assertTrue(plan.install)
-        self.assertEqual(plan.target_tag, "v2026.9.21")
-        self.assertEqual(plan.installed_label, "v2026.9.7")
+        self.assertEqual(plan.target_tag, "v0.22.4")
+        self.assertEqual(plan.installed_label, "v0.22.2")
         self.assertTrue(self.ledger_path.exists())
         self.assertTrue(load_ledger(self.ledger_path).bootstrapped)
 
@@ -345,17 +498,17 @@ class ScanAndApplyTests(HermesRepoTestCase):
         self.assertIn("does not exist", plan.error)
 
     def test_apply_pins_and_runs_pm_install(self) -> None:
-        self.checkout("v2026.9.7")
+        self.checkout("v0.22.2")
         plan = scan_and_plan(self.settings, now=NOW, ledger_path=self.ledger_path)
         result = apply_release_tag(self.settings, plan)
         self.assertTrue(result.success, result.summary)
         self.assertEqual(head_commit(self.settings), self.repo.commits["c3"])
         self.assertEqual(result.code_after, self.repo.commits["c3"])
         self.assertIn("hermes pm install", self.calls.read_text())
-        self.assertEqual(describe_head(self.settings), "v2026.9.21")
+        self.assertEqual(describe_head(self.settings), "v0.22.4")
 
     def test_apply_refuses_a_dirty_checkout(self) -> None:
-        self.checkout("v2026.9.7")
+        self.checkout("v0.22.2")
         (self.repo.source / "c0.txt").write_text("edited\n")
         plan = scan_and_plan(self.settings, now=NOW, ledger_path=self.ledger_path)
         result = apply_release_tag(self.settings, plan)
@@ -365,7 +518,7 @@ class ScanAndApplyTests(HermesRepoTestCase):
 
     def test_apply_rolls_the_code_back_when_pm_install_fails(self) -> None:
         write_fake_hermes(self.bin, pm_install_exit=3)
-        self.checkout("v2026.9.7")
+        self.checkout("v0.22.2")
         plan = scan_and_plan(self.settings, now=NOW, ledger_path=self.ledger_path)
         result = apply_release_tag(self.settings, plan)
         self.assertFalse(result.success)

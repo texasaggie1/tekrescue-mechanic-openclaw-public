@@ -1,12 +1,14 @@
-"""Hermes Agent release pinning (new in v0.2.0).
+"""Hermes Agent release pinning (new in v0.2.0, reworked in v0.2.1).
 
 Hermes (github.com/NousResearch/hermes-agent) is a source install: a git
-checkout at HERMES_SOURCE_DIR (default ~/.hermes/hermes-agent) that tracks
-`main`, with user data in HERMES_HOME (~/.hermes). Its own updater,
-`hermes update`, fast-forwards the checkout to the tip of `main` and has no
-way to ask for an older release. The maintainers do mark releases: plain
-tags such as v2026.9.24 land on `main` every few days, carry the date that
-`hermes --version` prints, and run the project's release-gate tests.
+checkout at HERMES_SOURCE_DIR (default ~/.hermes/hermes-agent), with user
+data in HERMES_HOME (~/.hermes). Since Hermes v0.22.0 (October 2026) a
+release is a published GitHub Release whose tag is a strict vX.Y.Z
+(v0.22.5); the dated tags of the earlier scheme (v2026.9.24) are retired
+and Hermes's own stable-tag rule rejects that shape. `hermes update` on an
+official checkout now follows the latest published stable release, only
+ever forward, and has no way to ask for an older one; canary builds are
+cut daily as `vX.Y.Z+canary.<stamp>` prereleases.
 
 So Mechanic pins. Each nightly (HERMES_UPDATE_MODE=release-tag):
 
@@ -27,12 +29,19 @@ So Mechanic pins. Each nightly (HERMES_UPDATE_MODE=release-tag):
   3. A tag whose commit differs from the one first recorded has MOVED.
      Tags are supposed to be immutable, so a moved tag is treated as
      hostile: never installed, reported loudly, cleared only by hand.
-  4. The newest eligible tag (plain v-tag, not skipped, not moved, aged
-     HERMES_MIN_UPDATE_AGE_DAYS) is compared with HEAD by git ancestry, not
-     by version string: it is installed only if HEAD is one of its
-     ancestors. HEAD already there means "current"; HEAD ahead (someone ran
-     `hermes update`, or the checkout is on main's tip) means "wait for a
-     newer tag"; anything else means "diverged, leaving the checkout alone".
+  4. The newest eligible tag (Hermes's stable shape, not skipped, not
+     moved, aged HERMES_MIN_UPDATE_AGE_DAYS) is compared with HEAD by git
+     ancestry, not by version string: it is installed only if HEAD is one
+     of its ancestors. HEAD already there means "current"; HEAD ahead
+     (someone ran `hermes update`, or the checkout is on main's tip) means
+     "wait for a newer tag"; anything else means "diverged, leaving the
+     checkout alone". Before pinning, Mechanic asks GitHub whether that tag
+     is a published, non-prerelease Release, the same test Hermes applies
+     (HERMES_RELEASE_CHECK=github, the default): an unpublished tag is
+     skipped for the next eligible one, and when GitHub cannot be asked
+     nothing is installed that night. A tag alone proves only that someone
+     with push rights ran `git tag`; the Release is the maintainers'
+     promotion.
   5. Install = `git checkout --detach <tag>`, then `hermes pm install`, the
      documented repair command that rebuilds the dependency environment
      for whatever the checkout is (Hermes's own `update` calls the same
@@ -42,9 +51,10 @@ So Mechanic pins. Each nightly (HERMES_UPDATE_MODE=release-tag):
 
 HERMES_UPDATE_MODE=hermes-update keeps Hermes's supported updater instead:
 the same waiting period on the newest tag, then `hermes update --yes`,
-which installs the tip of the configured channel (a trigger delay, not a
-pin). Either mode leaves the install alone on any failure to establish the
-facts, which is Mechanic's rule everywhere.
+which installs the latest published stable release at that moment (or the
+tip of the channel you name), not necessarily the tag that aged: a trigger
+delay, not a pin. Either mode leaves the install alone on any failure to
+establish the facts, which is Mechanic's rule everywhere.
 """
 
 from __future__ import annotations
@@ -66,7 +76,16 @@ from .release_age import version_key
 
 _LOG = logging.getLogger(__name__)
 
-RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# Hermes's own stable-tag shape (hermes_cli/update_channel.py STABLE_TAG_RE):
+# a major of at most three digits, so the retired dated tags (v2026.9.24,
+# a four-digit major) are not releases. Mixing the two schemes in one
+# numeric ordering is what kept v0.2.0 waiting for a month (2026-10).
+RELEASE_TAG_RE = re.compile(r"^v(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
+
+RELEASE_CHECK_GITHUB = "github"
+RELEASE_CHECK_NONE = "none"
+GITHUB_API_TIMEOUT_SECONDS = 30
+GITHUB_API = "https://api.github.com"
 
 GIT_TIMEOUT_SECONDS = 180
 PM_INSTALL_TIMEOUT_SECONDS = 3600
@@ -78,6 +97,9 @@ UPSTREAM_TAG_NAMESPACE = "refs/mechanic/upstream-tags/"
 
 MODE_RELEASE_TAG = "release-tag"
 MODE_HERMES_UPDATE = "hermes-update"
+
+#: (published?, why). None means "could not tell", which installs nothing.
+ReleaseCheck = Callable[[str], tuple[Optional[bool], str]]
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +379,93 @@ def local_tag_dates(spec: HermesSettings) -> dict[str, datetime]:
     return dates
 
 
+# ---------------------------------------------------------------------------
+# Publication check (GitHub Releases)
+# ---------------------------------------------------------------------------
+
+_GITHUB_ORIGIN_RE = re.compile(
+    r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def repository_from_url(url: str) -> Optional[str]:
+    """`owner/repo` for a github.com origin URL, else None."""
+    match = _GITHUB_ORIGIN_RE.fullmatch(url.strip())
+    return match.group(1) if match else None
+
+
+def origin_repository(spec: HermesSettings) -> Optional[str]:
+    """The checkout's GitHub repository, from `remote.origin.url`."""
+    result = _git(spec, "config", "--get", "remote.origin.url", timeout=30)
+    if not result.ok:
+        return None
+    return repository_from_url(result.stdout)
+
+
+def published_release(repository: str, tag: str, *, get=None) -> tuple[Optional[bool], str]:
+    """Is `tag` a published, non-prerelease GitHub Release of `repository`?
+
+    True/False with a one-line reason, or None when GitHub could not be
+    asked (network, rate limit, an unexpected answer). One anonymous
+    request; GitHub allows sixty an hour per address and a nightly makes
+    one or two. Hermes's own updater applies exactly this test, so a tag
+    Mechanic would pin is one Hermes would also install.
+    """
+    import requests  # local: keeps `mechanic plan` cheap when the check is off
+
+    from . import __version__
+
+    url = f"{GITHUB_API}/repos/{repository}/releases/tags/{tag}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": f"tekrescue-mechanic/{__version__}",
+    }
+    try:
+        response = (get or requests.get)(url, headers=headers, timeout=GITHUB_API_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - any transport failure means "unknown"
+        return None, f"GitHub could not be reached ({exc.__class__.__name__}: {exc})"
+    status = getattr(response, "status_code", None)
+    if status == 404:
+        return False, f"{tag} has no GitHub Release (a tag, not a release)"
+    if status in (403, 429):
+        return None, f"GitHub API refused the request (HTTP {status}, usually the anonymous rate limit)"
+    if status != 200:
+        return None, f"GitHub API answered HTTP {status}"
+    try:
+        data = response.json()
+    except Exception:  # noqa: BLE001
+        return None, "GitHub API answered with something that is not JSON"
+    if not isinstance(data, dict) or data.get("tag_name") != tag:
+        return None, f"GitHub API answered for a different tag than {tag}"
+    if data.get("draft") is True:
+        return False, f"{tag} is a draft release"
+    if data.get("prerelease") is True:
+        return False, f"{tag} is a prerelease"
+    if data.get("draft") is not False or data.get("prerelease") is not False:
+        return None, f"GitHub API answer for {tag} lacks the draft/prerelease fields"
+    return True, f"{tag} is a published release"
+
+
+def release_checker(spec: HermesSettings) -> Optional[ReleaseCheck]:
+    """The publication check for this install, or None when it is off."""
+    if spec.release_check == RELEASE_CHECK_NONE:
+        return None
+    repository = origin_repository(spec)
+
+    def check(tag: str) -> tuple[Optional[bool], str]:
+        if repository is None:
+            return None, (
+                "the checkout's origin is not a github.com repository, so releases "
+                "cannot be verified; set HERMES_RELEASE_CHECK=none to pin by tag alone"
+            )
+        return published_release(repository, tag)
+
+    return check
+
+
 def head_commit(spec: HermesSettings) -> Optional[str]:
     result = _git(spec, "rev-parse", "HEAD")
     return result.stdout.strip() if result.ok and result.stdout.strip() else None
@@ -475,6 +584,7 @@ def scan_and_plan(
         installed_label=describe_head(spec, upstream),
         now=now,
         ancestor_fn=lambda a, b: is_ancestor(spec, a, b),
+        published_fn=release_checker(spec),
     )
 
 
@@ -487,15 +597,25 @@ def plan_update(
     installed_label: str,
     now: datetime,
     ancestor_fn: Callable[[str, str], Optional[bool]],
+    published_fn: Optional[ReleaseCheck] = None,
 ) -> HermesPlan:
-    """Pure decision from already-gathered facts (unit-testable)."""
+    """Pure decision from already-gathered facts (unit-testable).
+
+    `published_fn` (release_checker) is consulted only for a tag that would
+    actually be pinned; None means no publication check.
+    """
     min_age = spec.min_update_age_days
     cutoff = now - timedelta(days=min_age)
     notes: list[str] = []
 
     release_tags = [t for t in upstream if RELEASE_TAG_RE.match(t) and t in ledger.tags]
     if not release_tags:
-        return _blocked(spec, "origin has no release tags of the form vX.Y.Z", error="no release tags", head=head)
+        return _blocked(
+            spec,
+            "origin has no release tags of Hermes's stable shape vX.Y.Z "
+            "(dated vYYYY.M.D tags are the retired scheme)",
+            error="no release tags", head=head,
+        )
 
     eligible: list[str] = []
     pending: list[str] = []
@@ -541,68 +661,102 @@ def plan_update(
             next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
         )
 
-    target = eligible[0]
-    record = ledger.tags[target]
-    commit = upstream[target]
-    age = _age_days(now, record.first_seen)
-    seen_phrase = f"{target} (first seen {_fmt_date(record.first_seen)}, {_days(age)} ago)"
-    tail, nxt, when = next_sentence(target)
+    for target in eligible:
+        record = ledger.tags[target]
+        commit = upstream[target]
+        age = _age_days(now, record.first_seen)
+        seen_phrase = f"{target} (first seen {_fmt_date(record.first_seen)}, {_days(age)} ago)"
+        tail, nxt, when = next_sentence(target)
 
-    if commit == head:
+        if commit == head:
+            reason = (
+                f"installed {installed_label} is already {target}, the newest release "
+                f"at least {_days(min_age)} in sight.{tail}"
+            )
+            return HermesPlan(
+                install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
+                reason=reason, code_before=head, installed_label=installed_label,
+                next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
+            )
+
+        upgrade = ancestor_fn(head, commit)
+        if upgrade is True:
+            if published_fn is not None:
+                published, why = published_fn(target)
+                if published is None:
+                    notes.append(f"release check: {why}")
+                    return HermesPlan(
+                        install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
+                        reason=(
+                            f"could not confirm that {target} is a published release ({why}); "
+                            f"installing nothing tonight."
+                        ),
+                        error="release check failed", code_before=head,
+                        installed_label=installed_label, next_tag=nxt, next_eligible_at=when,
+                        notes=tuple(notes),
+                    )
+                if published is False:
+                    notes.append(f"{target} skipped: {why}")
+                    continue
+            if spec.update_mode == MODE_HERMES_UPDATE:
+                reason = (
+                    f"{seen_phrase} is the newest release old enough and newer than the "
+                    f"installed {installed_label}; running `hermes update --yes`, which "
+                    f"installs the latest published stable release at that moment, or the "
+                    f"tip of the {spec.update_channel} channel"
+                    if spec.update_channel else
+                    f"{seen_phrase} is the newest release old enough and newer than the "
+                    f"installed {installed_label}; running `hermes update --yes`, which "
+                    f"installs the latest published stable release at that moment"
+                )
+                reason += f" (Hermes cannot pin a release).{tail}"
+            else:
+                reason = (
+                    f"{seen_phrase} is the newest release old enough and newer than the "
+                    f"installed {installed_label}; pinning the checkout to it.{tail}"
+                )
+            return HermesPlan(
+                install=True, mode=spec.update_mode, target_tag=target, target_commit=commit,
+                reason=reason, code_before=head, installed_label=installed_label,
+                next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
+            )
+
+        ahead = ancestor_fn(commit, head)
+        if ahead is True:
+            reason = (
+                f"installed {installed_label} is already ahead of {target}, the newest "
+                f"release old enough (someone ran `hermes update`, or the checkout sits "
+                f"on main's tip); Mechanic never downgrades and waits for a newer tag "
+                f"to age.{tail}"
+            )
+            return HermesPlan(
+                install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
+                reason=reason, code_before=head, installed_label=installed_label,
+                next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
+            )
+
         reason = (
-            f"installed {installed_label} is already {target}, the newest release "
-            f"at least {_days(min_age)} in sight.{tail}"
+            f"installed {installed_label} ({head[:12]}) and {target} ({commit[:12]}) are "
+            f"on different lines of history, or git could not compare them; leaving the "
+            f"checkout alone. Put it back on a release tag or on main to resume."
         )
         return HermesPlan(
             install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
-            reason=reason, code_before=head, installed_label=installed_label,
-            next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
+            reason=reason, error="checkout diverged", code_before=head,
+            installed_label=installed_label, next_tag=nxt, next_eligible_at=when,
+            notes=tuple(notes),
         )
 
-    upgrade = ancestor_fn(head, commit)
-    if upgrade is True:
-        if spec.update_mode == MODE_HERMES_UPDATE:
-            reason = (
-                f"{seen_phrase} is the newest release old enough and newer than the "
-                f"installed {installed_label}; running `hermes update --yes`, which "
-                f"installs the tip of the {spec.update_channel or 'configured'} channel "
-                f"(Hermes cannot pin a release).{tail}"
-            )
-        else:
-            reason = (
-                f"{seen_phrase} is the newest release old enough and newer than the "
-                f"installed {installed_label}; pinning the checkout to it.{tail}"
-            )
-        return HermesPlan(
-            install=True, mode=spec.update_mode, target_tag=target, target_commit=commit,
-            reason=reason, code_before=head, installed_label=installed_label,
-            next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
-        )
-
-    ahead = ancestor_fn(commit, head)
-    if ahead is True:
-        reason = (
-            f"installed {installed_label} is already ahead of {target}, the newest "
-            f"release old enough (someone ran `hermes update`, or the checkout sits "
-            f"on main's tip); Mechanic never downgrades and waits for a newer tag "
-            f"to age.{tail}"
-        )
-        return HermesPlan(
-            install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
-            reason=reason, code_before=head, installed_label=installed_label,
-            next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
-        )
-
+    # Every tag old enough was skipped (unpublished); wait for the next one.
+    tail, nxt, when = next_sentence(None)
     reason = (
-        f"installed {installed_label} ({head[:12]}) and {target} ({commit[:12]}) are "
-        f"on different lines of history, or git could not compare them; leaving the "
-        f"checkout alone. Put it back on a release tag or on main to resume."
+        f"no release old enough is a published GitHub Release yet "
+        f"(newest tag is {newest_label}); Mechanic waits.{tail}"
     )
     return HermesPlan(
-        install=False, mode=spec.update_mode, target_tag=target, target_commit=commit,
-        reason=reason, error="checkout diverged", code_before=head,
-        installed_label=installed_label, next_tag=nxt, next_eligible_at=when,
-        notes=tuple(notes),
+        install=False, mode=spec.update_mode, target_tag=None, target_commit=None,
+        reason=reason, code_before=head, installed_label=installed_label,
+        next_tag=nxt, next_eligible_at=when, notes=tuple(notes),
     )
 
 

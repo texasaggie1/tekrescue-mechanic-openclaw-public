@@ -57,7 +57,7 @@ catch yourself thinking "this would be easier as a plugin," stop.
 | `mechanic/rollback.py` | snapshots, restore, pruning, disk headroom; one SnapshotStore per target |
 | `mechanic/verifier.py` | health probe (the authoritative signal) and `openclaw update status` |
 | `mechanic/release_age.py` | OpenClaw's waiting period: which npm version is old enough tonight |
-| `mechanic/hermes_release.py` | Hermes's waiting period: tag ledger, ancestry check, pin, `hermes pm install`, gateway |
+| `mechanic/hermes_release.py` | Hermes's waiting period: tag ledger, ancestry check, GitHub Release check, pin, `hermes pm install`, gateway |
 | `mechanic/daemon.py` | launchd control for both gateways, plus the operator-disabled guard |
 | `mechanic/state.py` | supervisor state file per target (failure count, pause flag) |
 | `mechanic/reporter.py` | formats the morning report, one block per target |
@@ -154,6 +154,21 @@ and `hermes_tags.json`, the tag ledger).
   `OPENCLAW_GATEWAY_AUTOHEAL` defaults on; `HERMES_GATEWAY_AUTOHEAL`
   defaults off because Hermes operators tend to run their own watchdog
   and two healers fighting over one service helps nobody.
+- **Never rank tags from two numbering schemes in one order.** v0.2.0
+  compared Hermes tags with `version_key`, so when Hermes switched from
+  `v2026.9.24` to `v0.22.0` the retired dated tag stayed the "newest"
+  forever and every nightly from 2026-10-05 to 2026-10-27 reported the
+  checkout "already ahead" and waited, while five stable releases shipped.
+  v0.2.1 counts only Hermes's own stable shape as a release
+  (`RELEASE_TAG_RE`), and before pinning asks GitHub whether the tag is a
+  published, non-prerelease Release (`HERMES_RELEASE_CHECK=github`,
+  `published_release`): a bare tag proves only that someone with push
+  rights ran `git tag`; the Release is the maintainers' promotion, and it
+  is the test Hermes's own updater applies. GitHub unreachable means
+  nothing is installed that night, said in the report. When a project
+  you look after changes its versioning, the first symptom is a planner
+  that is "waiting" with a straight face; a target that has not moved in
+  three weeks deserves a look at upstream, not trust.
 - **A LaunchAgent lives in one of two per-user launchd domains, and
   `launchctl print` only sees the one you name.** `gui/<uid>` holds what
   a logged-in desktop session loads; `user/<uid>` holds what an SSH or
@@ -190,22 +205,31 @@ and `hermes_tags.json`, the tag ledger).
   which features an install has, `mechanic --help` does. Before every
   push here, grep the tree for the operator's agent names, client names,
   IPs, and personal emails; the private repo's CLAUDE.md lists them.
-- **Hermes facts (read 2026-10-04 from the hermes-agent source).** A
-  source install is a git checkout at `~/.hermes/hermes-agent` tracking
-  `main`, launcher `~/.local/bin/hermes`, data in `~/.hermes`, gateway
-  LaunchAgent `ai.hermes.gateway` (`-<profile>` suffix for extra
-  profiles). `hermes update` has `--yes`, `--check`, `--plan`, `--backup`,
-  `--no-backup`, `--channel`, `--branch`, `--no-gateway-restart`, and NO
-  way to request an older release; it fast-forwards to the branch tip or
-  to a published channel's exact commit. The `stable` channel record
-  (`https://hermes-assets.nousresearch.com/releases/channels/stable.json`)
-  returned 404 on 2026-10-04, so `--channel stable` fails today. Release
-  tags are plain `vYYYY.M.D` (every 3 to 7 days); the updater's own
-  stable-tag rule excludes that shape, canary builds are `v0.21.x+canary.
-  <stamp>`. `hermes pm install` (bare) is the documented repair command:
-  tool closure, then venv sync from the checkout's lock; it does no git
-  operations, so a pinned checkout stays pinned. `hermes pm status` prints
-  the sync receipt as JSON. `hermes doctor --fix` applies safe config
+- **Hermes facts (read 2026-10-04 and re-read 2026-10-27 from the
+  hermes-agent source).** A source install is a git checkout at
+  `~/.hermes/hermes-agent`, launcher `~/.local/bin/hermes`, data in
+  `~/.hermes`, gateway LaunchAgent `ai.hermes.gateway` (`-<profile>`
+  suffix for extra profiles). Since Hermes v0.22.0 (2026-10-13) a release
+  is a published GitHub Release (not draft, not prerelease) whose tag
+  matches Hermes's `STABLE_TAG_RE`, `^v(0|[1-9]\d{0,2})\.(0|[1-9]\d*)\.
+  (0|[1-9]\d*)$`; the dated `vYYYY.M.D` tags stopped at v2026.9.24 and
+  that shape is excluded on purpose (four-digit major). `hermes
+  source_releases.py` says it outright: "never infer publication from a
+  Git tag". Canary builds are daily `vX.Y.Z+canary.<stamp>` prereleases.
+  `hermes update` on an official checkout now follows `stable` by default
+  (latest published release, verified against origin), only forward, and
+  has `--yes`, `--check`, `--plan`, `--backup`, `--no-backup`, `--channel`
+  (transient), `--set-channel` (persisted in config.yaml), `--branch`,
+  `--no-gateway-restart`, and NO way to request an older release or a
+  commit. `hermes pm install` (bare) is the documented repair command:
+  tool closure, then venv sync from the checkout's lock; installing the
+  `python` package republishes the launchers (`pm/cli.py`), which answers
+  the launcher question from 2026-10-04; it does no git operations, so a
+  pinned checkout stays pinned. What it does NOT do and Hermes's own
+  updater does after a checkout moves: TUI/web/desktop product builds,
+  the bytecode sweep, the update receipt. Config migration is `hermes
+  doctor --fix`, which Mechanic runs. `hermes pm status` prints the sync
+  receipt as JSON. `hermes doctor --fix` applies safe config
   migrations non-interactively, may install a macOS TCC helper, acquire a
   missing tool through PM, and checkpoint SQLite WAL files; nothing in it
   starts or enables the gateway. `hermes backup --quick` writes a

@@ -34,7 +34,7 @@ def load_with(env: dict[str, str]):
         "HERMES_HOME", "HERMES_SOURCE_DIR", "HERMES_UPDATE_MODE", "HERMES_UPDATE_CHANNEL",
         "HERMES_MIN_UPDATE_AGE_DAYS", "HERMES_SKIP_TAGS", "HERMES_DOCTOR_FIX",
         "OPENCLAW_MIN_UPDATE_AGE_DAYS", "OPENCLAW_SKIP_VERSIONS", "MIN_UPDATE_AGE_DAYS",
-        "OPENCLAW_GATEWAY_AUTOHEAL", "HERMES_GATEWAY_AUTOHEAL",
+        "OPENCLAW_GATEWAY_AUTOHEAL", "HERMES_GATEWAY_AUTOHEAL", "HERMES_RELEASE_CHECK",
     )}
     with mock.patch.dict(os.environ, {**cleared, **env}, clear=False):
         return load_config(MISSING_ENV)
@@ -60,6 +60,7 @@ class TargetsConfigTests(unittest.TestCase):
         self.assertEqual(config.hermes.update_mode, "release-tag")
         self.assertTrue(config.hermes.doctor_fix)
         self.assertFalse(config.hermes.gateway_autoheal)
+        self.assertEqual(config.hermes.release_check, "github")
         with self.assertRaises(ConfigError):
             _ = config.openclaw_bin_path
 
@@ -69,7 +70,8 @@ class TargetsConfigTests(unittest.TestCase):
             "TARGETS": "openclaw, hermes",
             "MIN_UPDATE_AGE_DAYS": "10",
             "HERMES_MIN_UPDATE_AGE_DAYS": "14",
-            "HERMES_SKIP_TAGS": "v2026.9.21,v2026.9.14",
+            "HERMES_SKIP_TAGS": "v0.22.4,v0.22.3",
+            "HERMES_RELEASE_CHECK": "none",
             "HERMES_UPDATE_MODE": "hermes-update",
             "HERMES_UPDATE_CHANNEL": "stable",
             "HERMES_DOCTOR_FIX": "false",
@@ -84,7 +86,8 @@ class TargetsConfigTests(unittest.TestCase):
         self.assertEqual(config.openclaw.min_update_age_days, 10)
         self.assertEqual(config.openclaw.skip_versions, ("2026.9.6",))
         self.assertEqual(config.hermes.min_update_age_days, 14)
-        self.assertEqual(config.hermes.skip_tags, ("v2026.9.21", "v2026.9.14"))
+        self.assertEqual(config.hermes.skip_tags, ("v0.22.4", "v0.22.3"))
+        self.assertEqual(config.hermes.release_check, "none")
         self.assertEqual(config.hermes.update_mode, "hermes-update")
         self.assertEqual(config.hermes.update_channel, "stable")
         self.assertFalse(config.hermes.doctor_fix)
@@ -99,6 +102,8 @@ class TargetsConfigTests(unittest.TestCase):
             load_with({**BASE_ENV, "TARGETS": "openclaw,claude"})
         with self.assertRaises(ConfigError):
             load_with({"TARGETS": "hermes", "HERMES_UPDATE_MODE": "yolo"})
+        with self.assertRaises(ConfigError):
+            load_with({"TARGETS": "hermes", "HERMES_RELEASE_CHECK": "trust-me"})
 
 
 class DisabledGuardTests(unittest.TestCase):

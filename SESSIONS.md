@@ -38,9 +38,137 @@ Be honest about half-finished work.
 
 ---
 
+## 2026-10-27 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.1, Hermes's new release scheme
+
+### Resume here (checkpoint written 2026-10-27 ~04:00 UTC: code pushed, supervised run PENDING)
+A supervised run on the operator's Mac mini is next; the operator pastes
+terminal output and expects the next command block. Every command block
+given to the operator must start with `cd` to an absolute path.
+
+What happened: Hermes changed how it ships. Its last dated release tag is
+v2026.9.24; since v0.22.0 (2026-10-13) a release is a published GitHub
+Release with a strict `vX.Y.Z` tag (v0.22.0 through v0.22.5 by 2026-10-23,
+canary prereleases daily), and `hermes update` on an official checkout
+follows the latest published stable release by default, forward only.
+Mechanic 0.2.0 ranked tags numerically, so v2026.9.24 outranked every
+v0.22.x and every nightly since 2026-10-05 reported the Mac "already
+ahead" and waited. Nothing was installed for three weeks. v0.2.1 (this
+entry) fixes it; see "What we did".
+
+Where the code is: this branch and public `main` carry v0.2.1 (95 tests).
+The maintainer's private line is still at its v0.2.0 adoption (`25b5094`)
+until the operator runs `public/scripts/maintainer/sync-from-public.sh`
+again (plus its own session entry), as on 2026-10-04.
+
+The Mac mini (unverified since 2026-10-05; the operator has not pasted
+anything from it yet this session): last known state was Mechanic 0.2.0
+running from the private checkout, TARGETS=hermes, Hermes at the
+v2026.9.24-era commit 98d8ea79 (`hermes --version` said
+0.21.5+6547.g98d8ea7), gateway alive in `user/502`, OpenClaw disabled
+and booted out, first-known-good and last-known-good captured at 386 MB,
+retention 30 days. Verified upstream 2026-10-27: v0.22.1 through v0.22.5
+all descend from 98d8ea79, so the pin path is clean. Mechanic's ledger
+on the Mac should hold first-sight dates for v0.22.0 to v0.22.5 from the
+nightlies that mirrored them (around 2026-10-14 to 10-23), which makes
+v0.22.0 to v0.22.2 old enough today and v0.22.5 old enough about
+2026-10-30. Whether each is a PUBLISHED GitHub Release is not knowable
+from this session (the GitHub API is scoped off here); the new check on
+the Mac decides.
+
+Exact next steps:
+1. On the Mac: `cd /Users/openclaw/Projects/tekrescue-mechanic-openclaw
+   && git -C public pull --ff-only origin main && bash
+   public/scripts/maintainer/sync-from-public.sh`, then its own CLAUDE.md
+   note and SESSIONS entry, commit, push, `.venv/bin/pip install
+   --no-build-isolation --no-deps -e .`, `.venv/bin/mechanic --version`
+   (expect 0.2.1).
+2. `mechanic status` and `mechanic plan --target hermes`: expect the plan
+   to name a v0.22.x tag (v0.22.2 if published and 7 days in sight),
+   with any unpublished tags listed as skipped in the notes. If it says
+   "could not confirm ... published release", read the reason: GitHub
+   unreachable from the Mac or the origin URL not github.com.
+3. `mechanic run-now --target hermes`, supervised: snapshot (about a
+   minute), `git checkout --detach`, `hermes pm install` (minutes; first
+   real run of this step on a live install), `hermes doctor --fix`,
+   gateway restart (drain-first, can take long), verify (`hermes
+   --version` must name the tag, `hermes pm status`, `hermes gateway
+   status`). Expect STATUS: SUCCESS and a `Hermes version` line that
+   changes. On failure the report says whether the code was rolled back;
+   `mechanic restore --target hermes <snapshot>` puts data and code back.
+4. After success: confirm the gateway answers (the operator sends it a
+   message), `hermes --version`, `mechanic capture-first-good --target
+   hermes` is NOT needed (one exists); watch the next nightly carry the
+   pin to v0.22.5 when it ages.
+5. Record the outcome here and in the private log.
+
+### What we did
+- Re-synced after three idle weeks: both repos unchanged since 2026-10-05;
+  test environment rebuilt. Found upstream Hermes had changed its release
+  scheme (facts in AGENTS.md section 4, "Hermes facts", re-read from the
+  hermes-agent source at a382af23, 2026-10-26).
+- `RELEASE_TAG_RE` is now Hermes's own stable shape (major of at most
+  three digits), so the retired dated tags are not releases and cannot
+  outrank the semver ones. Ranking, first-sight aging, moved-tag refusal,
+  ancestry, skip list: unchanged.
+- New publication check (`HERMES_RELEASE_CHECK`, default `github`):
+  before pinning, `published_release` asks the GitHub API whether the tag
+  is a published, non-prerelease Release, the test Hermes's own updater
+  applies. Unpublished: skipped, next eligible tag considered, named in
+  the notes. GitHub unreachable or rate limited: nothing installed that
+  night, said in the report (error "release check failed"). Only asked
+  for a tag that would actually be pinned. `none` turns it off (needed
+  for a non-github.com origin, and for the test fixtures).
+- The planner loop now walks the eligible tags newest first instead of
+  deciding on the single newest; a HEAD already sitting on an eligible
+  tag reports "current" even when newer tags are unpublished.
+- Docs: README Hermes section and config table, troubleshooting entry
+  for the "waiting for weeks" symptom, .env.example, AGENTS.md facts and
+  a new scar ("never rank tags from two numbering schemes in one order").
+  Version 0.2.1. Tests: fixture tags are semver with a dated decoy;
+  publication, request shape, origin parsing, checker tests. 95 tests.
+- Also learned from the Hermes source: `hermes pm install` republishes the
+  launchers when it installs the `python` package (the open question from
+  2026-10-04); Hermes's updater additionally rebuilds TUI/web/desktop
+  products and sweeps bytecode after a checkout moves, which Mechanic's
+  pin does not do (open question below).
+
+### Current state
+v0.2.1 pushed, unit-tested, NOT yet run on a live install. The Mac still
+runs v0.2.0 and is a month behind Hermes stable. The supervised run
+(Resume block) is the first real pin on a live machine.
+
+### Decisions made
+- Keep the git pin as the default; `hermes update` cannot pin, so a
+  delayed `hermes update` is still a trigger delay, not a week behind.
+- Verify publication like Hermes does rather than trusting tags, fail
+  closed when GitHub cannot be asked. Rejected: reading the pointer on
+  hermes-assets (`releases/stable/release-candidates.json`): it names the
+  bundled desktop build (v0.22.0 on 2026-10-27 while tags reach v0.22.5)
+  and Hermes's own source updater ignores it.
+- No exception to the 7-day rule for the first pin (operator, 2026-10-27).
+
+### Open questions
+- Mechanic's pin skips the product builds (TUI/web/desktop) and bytecode
+  sweep Hermes's updater runs after a checkout moves. The Mac runs the
+  Telegram gateway; whether the missing builds matter there is what the
+  supervised run tells us. If they do, find the public command that
+  rebuilds them, or document `hermes update --yes` as the way to catch up
+  once the pinned tag is the latest stable.
+- Which of v0.22.1 to v0.22.5 are published Releases (the Mac's check
+  will say).
+- Carried: snapshot retention (30 fits), idna/urllib3 relock, the private
+  line's adoption of this release.
+
+### Next session should
+1. Run the Resume block on the Mac with the operator.
+2. Adopt v0.2.1 into the private line (sync script, its own log entry).
+3. Decide the product-build question from what the run showed.
+
+---
+
 ## 2026-10-04 (UTC) - branch: main - v0.2.0 merged to main
 
-### Resume here (checkpoint rewritten 2026-10-05 ~00:30 UTC: deployment COMPLETE, both repos at v0.2.0)
+### Resume here (historical: the v0.2.0 deployment record; the live checkpoint is in the entry above)
 The supervised deployment on the operator's Mac mini finished on
 2026-10-04. Steps 1 to 5 below are done; what remains is watching and
 the maintainer's own follow-ups (step 6). The OpenClaw gateway was taken

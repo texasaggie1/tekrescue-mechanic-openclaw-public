@@ -36,6 +36,7 @@ VALID_PROMPT_MODES = ("STRICT", "ESCALATE", "AUTO_YES")
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VALID_NOTIFIERS = ("none", "telegram", "slack", "webhook", "email")
 VALID_TARGETS = ("openclaw", "hermes")
+VALID_HERMES_RELEASE_CHECKS = ("github", "none")
 VALID_HERMES_UPDATE_MODES = ("release-tag", "hermes-update")
 
 # Mechanic-internal env vars that must NOT leak into subprocesses invoking
@@ -61,6 +62,7 @@ _MECHANIC_ENV_VARS = (
     "HERMES_SKIP_TAGS",
     "HERMES_DOCTOR_FIX",
     "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS",
+    "HERMES_RELEASE_CHECK",
     "UPDATE_TIME",
     "MIN_UPDATE_AGE_DAYS",
     "SUPERVISOR_INTERVAL_MINUTES",
@@ -146,7 +148,10 @@ class HermesSettings:
     newest release tag that has aged MIN_UPDATE_AGE_DAYS, then rebuilds the
     environment with Hermes's own package manager) or `hermes-update`
     (Mechanic waits for a tag to age, then runs `hermes update --yes`, which
-    installs the tip of the configured channel). See hermes_release.py.
+    installs the latest published stable release at that moment, or the
+    tip of the channel named). `release_check` is `github` (a tag is pinned
+    only when it is a published, non-prerelease GitHub Release, the test
+    Hermes itself applies) or `none`. See hermes_release.py.
     """
 
     bin_path: Path
@@ -161,6 +166,7 @@ class HermesSettings:
     #: Off by default: Hermes operators often run their own gateway
     #: watchdog, and two healers fighting over one service helps nobody.
     gateway_autoheal: bool = False
+    release_check: str = "github"
 
 
 @dataclass(frozen=True)
@@ -347,6 +353,12 @@ def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
             f"Got: {mode!r}."
         )
     channel = _env("HERMES_UPDATE_CHANNEL") or None
+    release_check = (_env("HERMES_RELEASE_CHECK") or "github").lower()
+    if release_check not in VALID_HERMES_RELEASE_CHECKS:
+        raise ConfigError(
+            f"HERMES_RELEASE_CHECK must be one of {', '.join(VALID_HERMES_RELEASE_CHECKS)}. "
+            f"Got: {release_check!r}."
+        )
     return HermesSettings(
         bin_path=Path(bin_raw).expanduser(),
         home=home,
@@ -362,6 +374,7 @@ def _load_hermes(path: Path, *, default_min_age: int) -> HermesSettings:
             "HERMES_GATEWAY_RESTART_TIMEOUT_SECONDS", default=2400, min_value=60
         ),
         gateway_autoheal=_env_bool("HERMES_GATEWAY_AUTOHEAL", default=False),
+        release_check=release_check,
     )
 
 
