@@ -116,8 +116,9 @@ Exact next steps:
    web and ui-tui workspaces ("wait for an upstream lockfile fix"). So
    the product builds exist and doctor is content with them; the
    open question about what the pin skips is closed for this setup.
-   Telegram delivered the report as plain text. Still the operator's:
-   message the agent and ask who it is. The 02:00 nightly should say
+   Telegram delivered the report as plain text. The operator messaged
+   the agent afterwards: acting normally (2026-10-27 ~04:00 UTC), which
+   is the post-op check that counts. The 02:00 nightly should say
    "already v0.22.5".
 5. DONE (~03:45 UTC): v0.2.1 adopted into the private line (`28391fd`),
    venv repointed at the private root, `mechanic status` 0.2.1.
