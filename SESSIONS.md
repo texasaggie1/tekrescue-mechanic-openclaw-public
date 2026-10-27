@@ -40,7 +40,7 @@ Be honest about half-finished work.
 
 ## 2026-10-27 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.1, Hermes's new release scheme
 
-### Resume here (checkpoint rewritten 2026-10-27 ~03:30 UTC: first live pin DONE and verified; private adoption pending)
+### Resume here (checkpoint rewritten 2026-10-27 ~03:50 UTC: v0.2.1 deployment COMPLETE, both repos level)
 A supervised run on the operator's Mac mini is next; the operator pastes
 terminal output and expects the next command block. Every command block
 given to the operator must start with `cd` to an absolute path.
@@ -55,10 +55,13 @@ v0.22.x and every nightly since 2026-10-05 reported the Mac "already
 ahead" and waited. Nothing was installed for three weeks. v0.2.1 (this
 entry) fixes it; see "What we did".
 
-Where the code is: this branch and public `main` carry v0.2.1 (95 tests).
-The maintainer's private line is still at its v0.2.0 adoption (`25b5094`)
-until the operator runs `public/scripts/maintainer/sync-from-public.sh`
-again (plus its own session entry), as on 2026-10-04.
+Where the code is: this branch and public `main` carry v0.2.1 (101
+tests). The maintainer's private line adopted it on 2026-10-27 03:45 UTC
+(its commit `28391fd`, via `sync-from-public.sh` plus its own CLAUDE.md
+sentence and session entry); the Mac's venv is back on the private
+checkout, `mechanic 0.2.1`, targets hermes. Nothing is pending on the
+Mac. Watch next: the 02:00 nightly ("already v0.22.5") and the first
+unsupervised fast-lane or 7-day pin when a newer release ages.
 
 The Mac mini, round 1 (2026-10-27 ~05:00 UTC, pasted by the operator):
 `public/` pulled to v0.2.1, venv pointed at `public/` for the walkthrough
@@ -116,9 +119,8 @@ Exact next steps:
    Telegram delivered the report as plain text. Still the operator's:
    message the agent and ask who it is. The 02:00 nightly should say
    "already v0.22.5".
-5. Then adopt v0.2.1 into the private line (`sync-from-public.sh`, its
-   own CLAUDE.md note and SESSIONS entry), repoint the venv at the
-   private root, record the outcome here.
+5. DONE (~03:45 UTC): v0.2.1 adopted into the private line (`28391fd`),
+   venv repointed at the private root, `mechanic status` 0.2.1.
 
 ### What we did
 - Re-synced after three idle weeks: both repos unchanged since 2026-10-05;
