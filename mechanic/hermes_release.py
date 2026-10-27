@@ -870,6 +870,25 @@ def apply_release_tag(spec: HermesSettings, plan: HermesPlan) -> ApplyResult:
     if not clean:
         return ApplyResult(False, f"refused: {why}", steps)
 
+    # Hermes derives the version it prints from the release tags in its
+    # OWN tag list (`git tag --merged HEAD`), and Mechanic keeps upstream
+    # tags in a private namespace. Give it the one tag it is being pinned
+    # to, whose commit the ledger has already verified, so `hermes
+    # --version` says v0.22.5 rather than "v0.22.2 plus 3291 commits"
+    # (seen on the first live pin, 2026-10-27). Never forced: a local tag
+    # of that name pointing elsewhere is left alone and reported.
+    tag_fetch = _git(
+        spec, "fetch", "--quiet", "--no-tags", "origin",
+        f"refs/tags/{plan.target_tag}:refs/tags/{plan.target_tag}",
+    )
+    if tag_fetch.ok:
+        steps.append(f"git fetch tag {plan.target_tag} into the checkout's tags exit 0")
+    else:
+        steps.append(
+            f"git fetch tag {plan.target_tag} FAILED ({tag_fetch.tail()}); Hermes will "
+            f"describe its version from the tags it has"
+        )
+
     checkout = _git(spec, "checkout", "--quiet", "--detach", plan.target_commit)
     if not checkout.ok:
         return ApplyResult(False, f"git checkout {plan.target_tag} failed ({checkout.tail()})", steps)

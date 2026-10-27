@@ -40,7 +40,7 @@ Be honest about half-finished work.
 
 ## 2026-10-27 (UTC) - branch: claude/open-claw-version-delay-gr91ha - v0.2.1, Hermes's new release scheme
 
-### Resume here (checkpoint rewritten 2026-10-27 ~05:30 UTC: round 1 done, supervised pin PENDING)
+### Resume here (checkpoint rewritten 2026-10-27 ~03:10 UTC Mac time 22:10 CDT 10-26: first live pin DONE, post-op checks pending)
 A supervised run on the operator's Mac mini is next; the operator pastes
 terminal output and expects the next command block. Every command block
 given to the operator must start with `cd` to an absolute path.
@@ -74,12 +74,28 @@ than the installed v2026.9.24+7025.g27c02f6326; pinning the checkout to
 it. Next: v0.22.3 becomes eligible 2026-10-28T13:43Z." No skip notes, so
 GitHub's API answers from the Mac and v0.22.2 is a published release.
 
+Round 2 (fast lane live): the plan changed to "v0.22.5 (first seen
+2026-10-23, 3 days ago) (marked critical, fast lane) ... release notes
+mention 'security'", the operator's rule working as asked.
+Round 3, the first real pin (02:47 to 02:49 UTC, 21:47 CDT 10-26):
+STATUS SUCCESS. Snapshot 511 MB (tar 323 MB, state.db now 214 MB
+gzipped), `git checkout --detach v0.22.5 (bf0203a794a0)`, `hermes pm
+install exit 0` in about a minute, `hermes doctor --fix exit 1` with 4
+findings for the operator (was 5), `hermes gateway restart exit 0`,
+verify healthy, gateway on new pid 89958, last-known-good refreshed.
+Report line "Hermes version: 0.21.5+7025.g27c02f6 -> 0.22.2+3291.gbf0203a":
+the commit is right (v0.22.5's), the label is not, because Hermes derives
+its version from its own refs/tags and Mechanic's mirror is elsewhere;
+fixed in the commit after (Mechanic fetches the pinned tag into
+refs/tags before the checkout). On the Mac the one-time repair is
+`git -C ~/.hermes/hermes-agent fetch --no-tags origin
+refs/tags/v0.22.5:refs/tags/v0.22.5`, after which `hermes --version`
+should print 0.22.5.
+
 Exact next steps:
-1. DONE (round 1): venv on `public/` at v0.2.1, status and plan as above.
-2. `git -C public pull --ff-only origin main` once more (the fast lane
-   landed after round 1), `mechanic --version` still 0.2.1, `mechanic
-   plan --target hermes` again (same answer expected: v0.22.2).
-3. `mechanic run-now --target hermes`, supervised: snapshot (about a
+1. DONE (round 1): venv on `public/` at v0.2.1, status and plan.
+2. DONE (round 2): fast lane plan, v0.22.5.
+3. DONE (round 3): `mechanic run-now --target hermes`, as recorded above. Reference, what the run does: snapshot (about a
    minute), `git checkout --detach`, `hermes pm install` (minutes; first
    real run of this step on a live install), `hermes doctor --fix`,
    gateway restart (drain-first, can take long), verify (`hermes
@@ -87,13 +103,14 @@ Exact next steps:
    status`). Expect STATUS: SUCCESS and a `Hermes version` line that
    changes. On failure the report says whether the code was rolled back;
    `mechanic restore --target hermes <snapshot>` puts data and code back.
-4. After success: confirm the gateway answers (the operator sends it a
-   message), `hermes --version`, `mechanic capture-first-good --target
-   hermes` is NOT needed (one exists); watch the next nightly carry the
-   pin to v0.22.5 when it ages.
-5. Record the outcome here and in the private log; then adopt v0.2.1
-   into the private line (`sync-from-public.sh`, its own entry), and
-   repoint the venv at the private root.
+4. PENDING, post-op (the briefing's rule 5): pull the tag-fetch fix,
+   run the one-time tag repair, `hermes --version` (expect 0.22.5),
+   `hermes gateway status`, `hermes doctor` to read the 4 findings (the
+   operator's), and the operator sends the agent a message and asks who
+   it is. Then watch the 02:00 nightly report "already v0.22.5".
+5. Then adopt v0.2.1 into the private line (`sync-from-public.sh`, its
+   own CLAUDE.md note and SESSIONS entry), repoint the venv at the
+   private root, record the outcome here.
 
 ### What we did
 - Re-synced after three idle weeks: both repos unchanged since 2026-10-05;
@@ -127,6 +144,9 @@ Exact next steps:
   are asked about; an unknown answer on one of them just keeps it
   waiting (never blocks the night); the report names the lane. Empty
   keywords turn it off. 100 tests.
+- After the first live pin: Mechanic now fetches the single tag it pins
+  into Hermes's own `refs/tags` (never forced) so `hermes --version`
+  names the release instead of "previous tag plus N commits". 101 tests.
 - Also learned from the Hermes source: `hermes pm install` republishes the
   launchers when it installs the `python` package (the open question from
   2026-10-04); Hermes's updater additionally rebuilds TUI/web/desktop
@@ -134,9 +154,12 @@ Exact next steps:
   pin does not do (open question below).
 
 ### Current state
-v0.2.1 pushed, unit-tested, NOT yet run on a live install. The Mac still
-runs v0.2.0 and is a month behind Hermes stable. The supervised run
-(Resume block) is the first real pin on a live machine.
+v0.2.1 is on the Mac (venv on `public/`) and has done the first real pin
+on a live install: Hermes moved from a 2026.9.24-era commit to v0.22.5
+in two minutes with a verified gateway restart. Post-op checks and the
+private adoption remain (Resume block). The product-build question
+(Hermes's updater rebuilds TUI/web/desktop after a checkout move;
+Mechanic's pin does not) is still open; nothing in the run complained.
 
 ### Decisions made
 - Keep the git pin as the default; `hermes update` cannot pin, so a

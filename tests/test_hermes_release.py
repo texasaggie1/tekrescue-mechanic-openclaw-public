@@ -565,6 +565,20 @@ class ScanAndApplyTests(HermesRepoTestCase):
         self.assertIn("hermes pm install", self.calls.read_text())
         self.assertEqual(describe_head(self.settings), "v0.22.4")
 
+    def test_apply_gives_hermes_the_pinned_tag(self) -> None:
+        # The install checkout was cloned before the tag existed on origin
+        # (as a long-lived checkout would be), so only Mechanic's fetch can
+        # bring it in. Hermes reads its own tags for `hermes --version`.
+        self.checkout("v0.22.2")
+        git("tag", "-d", "v0.22.4", cwd=self.repo.source)
+        self.assertEqual(git("tag", "-l", "v0.22.4", cwd=self.repo.source), "")
+        plan = scan_and_plan(self.settings, now=NOW, ledger_path=self.ledger_path)
+        result = apply_release_tag(self.settings, plan)
+        self.assertTrue(result.success, result.summary)
+        self.assertEqual(git("tag", "-l", "v0.22.4", cwd=self.repo.source), "v0.22.4")
+        self.assertEqual(git("tag", "--merged", "HEAD", "-l", "v0.22.4", cwd=self.repo.source), "v0.22.4")
+        self.assertTrue(any("git fetch tag v0.22.4" in step and "exit 0" in step for step in result.steps))
+
     def test_apply_refuses_a_dirty_checkout(self) -> None:
         self.checkout("v0.22.2")
         (self.repo.source / "c0.txt").write_text("edited\n")

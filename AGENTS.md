@@ -232,7 +232,13 @@ and `hermes_tags.json`, the tag ledger).
   tool closure, then venv sync from the checkout's lock; installing the
   `python` package republishes the launchers (`pm/cli.py`), which answers
   the launcher question from 2026-10-04; it does no git operations, so a
-  pinned checkout stays pinned. What it does NOT do and Hermes's own
+  pinned checkout stays pinned. `hermes --version` derives its base
+  version from the stable tags in the checkout's OWN `refs/tags`
+  (`git tag --merged HEAD`); Mechanic's upstream mirror lives elsewhere,
+  so the first live pin (2026-10-27, v0.22.5) printed "0.22.2+3291" until
+  v0.2.1 started fetching the single pinned tag into `refs/tags` before
+  the checkout (never forced: a local tag of that name pointing elsewhere
+  is left alone and reported). What it does NOT do and Hermes's own
   updater does after a checkout moves: TUI/web/desktop product builds,
   the bytecode sweep, the update receipt. Config migration is `hermes
   doctor --fix`, which Mechanic runs. `hermes pm status` prints the sync

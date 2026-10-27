@@ -357,9 +357,11 @@ So Mechanic pins. Each nightly with `HERMES_UPDATE_MODE=release-tag`:
    databases (`state.db`, `cron/*.db`, and friends) are copied with
    SQLite's online backup API and stored gzipped inside the snapshot, so
    the archive carries a consistent database rather than a racy copy of
-   a live WAL file. Then `git checkout --detach <tag>`, `hermes pm
-   install` (Hermes's documented repair command, the same code its
-   updater runs), `hermes doctor --fix`, and a gateway restart through
+   a live WAL file. Then it fetches that one tag into Hermes's own tag
+   list (Hermes derives the version it prints from its local tags),
+   `git checkout --detach <tag>`, `hermes pm install` (Hermes's
+   documented repair command, the same code its updater runs),
+   `hermes doctor --fix`, and a gateway restart through
    launchd if one was running and you have not disabled it. Verify checks
    `hermes --version`, that the checkout landed on the expected commit,
    `hermes pm status`, and `hermes gateway status`.
